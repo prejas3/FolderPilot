@@ -95,8 +95,8 @@ function foldersPage() {
     ? `<ul class="list">${folders.map((f, i) => `
         <li class="card row">
           <span class="ic">${icons.folder}</span>
-          <span class="grow"><span class="path" title="${esc(f.path)}">${esc(f.path)}</span>
-            <span class="sub">${f.paused ? "Paused" : "Watching"}</span></span>
+          <span class="grow"><span class="name">${esc(tail(f.path, 1))}</span>
+            <span class="sub" title="${esc(f.path)}">${f.paused ? "Paused" : "Watching"} – ${esc(f.path)}</span></span>
           ${toggle(!f.paused, "folder-pause", i, `Watch ${f.path}`)}
           <button class="icon-btn" data-act="folder-remove" data-i="${i}" aria-label="Stop watching ${esc(f.path)}">${icons.trash}</button>
         </li>`).join("")}</ul>`
@@ -153,7 +153,7 @@ function editorPage(r: Rule) {
         <input class="input" data-field="name" value="${esc(r.name)}" placeholder="PDFs to Documents" autocomplete="off"></label>
       <div class="line"><span class="word">When a file in</span>
         <span class="chips">${chip("All folders", !r.folders.length, "folder-all", "")}
-          ${folders.map((f) => chip(short(f.path), r.folders.includes(f.path), "folder-chip", f.path)).join("")}</span></div>
+          ${folders.map((f) => chip(tail(f.path, 1), r.folders.includes(f.path), "folder-chip", f.path)).join("")}</span></div>
       ${conds.join('<div class="and">and</div>')}
       <div class="line">${add}</div>
       <div class="line then-line">
@@ -203,13 +203,17 @@ function previewPage() {
 function activityPage() {
   const runs = new Map<string, JournalEntry[]>();
   for (const e of [...journal].reverse()) runs.set(e.run, [...(runs.get(e.run) ?? []), e]);
+  // Engine journals an undo as run "undo-<run>": it gets no button, and its run shows as undone.
+  const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
   const body = runs.size
     ? `<ul class="list">${[...runs].map(([run, entries]) => `
         <li class="card run">
           <div class="run-head">
             <span class="grow"><span class="name">${when(entries[0].at)}</span>
-              <span class="sub">${entries.length} ${entries.length === 1 ? "file" : "files"} moved</span></span>
-            <button class="ghost" data-act="undo" data-k="${esc(run)}">${icons.undo}<span>Undo</span></button>
+              <span class="sub">${run.startsWith("undo-") ? `Undo: ${files(entries.length)} moved back` : `${files(entries.length)} moved`}</span></span>
+            ${run.startsWith("undo-") ? "" : runs.has(`undo-${run}`)
+              ? `<span class="sub">Undone</span>`
+              : `<button class="ghost" data-act="undo" data-k="${esc(run)}">${icons.undo}<span>Undo</span></button>`}
           </div>
           <ul class="moves">${entries.map((p) => move(p)).join("")}</ul>
         </li>`).join("")}</ul>`
@@ -218,7 +222,7 @@ function activityPage() {
 }
 
 const move = (p: { from: string; to: string }) =>
-  `<li class="move"><span class="file" title="${esc(p.from)}">${esc(short(p.from))}</span>${icons.arrow}<span class="dest" title="${esc(p.to)}">${esc(short(p.to))}</span></li>`;
+  `<li class="move"><span class="file" title="${esc(p.from)}">${esc(tail(p.from, 2))}</span>${icons.arrow}<span class="dest" title="${esc(p.to)}">${esc(tail(p.to, 3))}</span></li>`;
 
 const empty = (title: string, text: string) => `<div class="empty"><p class="name">${title}</p><p class="sub">${text}</p></div>`;
 
@@ -262,6 +266,11 @@ function sampleFile(r: Rule) {
   return `${stem}.${ext}`;
 }
 
+/** Last `n` path segments ("…/Documents/PDF/a.pdf"); full path goes in a title. */
+const tail = (p: string, n: number) => {
+  const parts = p.split(/[\\/]/).filter(Boolean);
+  return parts.length > n ? `…/${parts.slice(-n).join("/")}` : parts.join("/");
+};
 const short = (p: string) => p.replace(/^~[\\/]?/, "").replace(/\\/g, "/");
 const mb = (bytes: number) => String(+(bytes / 1048576).toFixed(2));
 const when = (at: number) =>
@@ -359,13 +368,15 @@ const actions: Record<string, (el: HTMLElement) => unknown> = {
   try: () => { previewOf = draft!.id; view = "preview"; return runPreview(); },
   "preview-of": (el) => { previewOf = el.dataset.k!; planned = null; render(); },
   "run-preview": () => runPreview(),
+  // Partly done is still done: show Activity, then say which files were left.
   apply: async () => {
-    await api.apply(planned!);
+    const error = await api.apply(planned!).then(() => null, (e) => e);
     planned = null;
     view = "activity";
     await refreshActivity();
+    if (error) toast(String(error));
   },
-  undo: async (el) => { await api.undo(el.dataset.k!); await refreshActivity(); },
+  undo: (el) => api.undo(el.dataset.k!).finally(refreshActivity),
 };
 
 async function runPreview() {

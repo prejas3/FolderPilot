@@ -87,6 +87,20 @@ impl Organizer {
         Ok(applied)
     }
 
+    /// Dry run of one rule over every watched folder it applies to (paused ones too); missing folders are skipped.
+    pub fn preview(&self, rule: &Rule) -> io::Result<Vec<Planned>> {
+        let produced = lock(&self.produced);
+        let mut planned = Vec::new();
+        for folder in self.folders() {
+            match engine::plan(&folder.path, std::slice::from_ref(rule), &produced) {
+                Ok(more) => planned.extend(more),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(planned)
+    }
+
     /// Preview's Apply.
     pub fn apply(&self, planned: &[Planned]) -> io::Result<Applied> {
         let produced = lock(&self.produced);
