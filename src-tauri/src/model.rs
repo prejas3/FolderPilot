@@ -62,6 +62,9 @@ pub struct JournalEntry {
     /// Unix seconds.
     pub at: u64,
     pub rule: String,
+    /// Bytes when moved; undo skips a file whose size changed since.
+    #[serde(default)]
+    pub size: u64,
 }
 
 #[cfg(test)]

@@ -1,3 +1,4 @@
+#[allow(dead_code, unused_imports)] // CCS/1 TODO:#164 wires engine into the commands
 mod engine;
 pub mod model;
 
