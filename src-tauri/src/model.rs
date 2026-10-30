@@ -65,6 +65,9 @@ pub struct JournalEntry {
     /// Bytes when moved; undo skips a file whose size changed since.
     #[serde(default)]
     pub size: u64,
+    /// Modified time when moved, unix nanoseconds; undo also skips a file whose time changed. 0 = unknown.
+    #[serde(default)]
+    pub modified: u64,
 }
 
 #[cfg(test)]

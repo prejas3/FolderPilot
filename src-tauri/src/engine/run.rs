@@ -1,6 +1,7 @@
 //! CCS/1 M:engine/run | PURPOSE:carry out planned moves, journal them, undo a run
 //! !RULE:never overwrite; never delete user data except the source after a size-verified cross-volume copy
 //! STATE:journal.jsonl, one JournalEntry per line, appended after every single move (a crash keeps what was done undoable)
+//! !RULE:no unjournalled move: journal opened before the first move; a failed write moves that file back and aborts the run
 use super::{key, numbered};
 use crate::model::{JournalEntry, Planned};
 use std::{
@@ -29,14 +30,14 @@ pub struct Undone {
 }
 
 pub fn apply(planned: &[Planned], journal: &Path) -> io::Result<Applied> {
+    apply_to(planned, &mut open_journal(journal)?)
+}
+
+fn apply_to(planned: &[Planned], log: &mut impl Write) -> io::Result<Applied> {
     let mut applied = Applied { run: run_id(), ..Default::default() };
     for p in planned {
-        match move_file(&p.from, &p.to) {
-            Ok((to, size)) => {
-                let entry = JournalEntry { run: applied.run.clone(), from: p.from.clone(), to, at: now(), rule: p.rule.clone(), size };
-                append(journal, &entry)?;
-                applied.done.push(entry);
-            }
+        match journalled_move(&p.from, &p.to, &applied.run, &p.rule, log)? {
+            Ok(entry) => applied.done.push(entry),
             Err(error) => applied.failed.push((p.from.clone(), error.to_string())),
         }
     }
@@ -46,27 +47,51 @@ pub fn apply(planned: &[Planned], journal: &Path) -> io::Result<Applied> {
 /// Moves a run's files back, newest first, journalled as run "undo-<run>". Skips files gone or changed since.
 pub fn undo(run: &str, journal: &Path) -> io::Result<Undone> {
     let entries = load_journal(journal)?;
+    undo_to(run, &entries, &mut open_journal(journal)?)
+}
+
+fn undo_to(run: &str, entries: &[JournalEntry], log: &mut impl Write) -> io::Result<Undone> {
     let mut undone = Undone { run: format!("undo-{run}"), ..Default::default() };
     for e in entries.iter().filter(|e| e.run == run).rev() {
         let skip = match fs::metadata(&e.to) {
             Err(_) => Some("no longer there".to_string()),
-            Ok(meta) if meta.len() != e.size => Some("changed since it was moved".to_string()),
+            // modified 0 = entry from before it was journalled: size only.
+            Ok(meta) if meta.len() != e.size || (e.modified != 0 && modified(&meta) != e.modified) => {
+                Some("changed since it was moved".to_string())
+            }
             Ok(_) => None,
         };
         if let Some(reason) = skip {
             undone.skipped.push((e.to.clone(), reason));
             continue;
         }
-        match move_file(&e.to, &e.from) {
-            Ok((to, size)) => {
-                let entry = JournalEntry { run: undone.run.clone(), from: e.to.clone(), to, at: now(), rule: e.rule.clone(), size };
-                append(journal, &entry)?;
-                undone.restored.push(entry);
-            }
+        match journalled_move(&e.to, &e.from, &undone.run, &e.rule, log)? {
+            Ok(entry) => undone.restored.push(entry),
             Err(error) => undone.skipped.push((e.to.clone(), error.to_string())),
         }
     }
     Ok(undone)
+}
+
+/// Outer Err aborts the run (journal broken, file moved back); inner Err = this file left where it was.
+fn journalled_move(from: &Path, to: &Path, run: &str, rule: &str, log: &mut impl Write) -> io::Result<io::Result<JournalEntry>> {
+    let (to, size, modified) = match move_file(from, to) {
+        Ok(moved) => moved,
+        Err(error) => return Ok(Err(error)),
+    };
+    let entry = JournalEntry { run: run.into(), from: from.into(), to, at: now(), rule: rule.into(), size, modified };
+    let written = serde_json::to_string(&entry)
+        .map_err(io::Error::from)
+        .and_then(|line| writeln!(log, "{line}"))
+        .and_then(|()| log.flush());
+    if let Err(error) = written {
+        let back = match move_file(&entry.to, from) {
+            Ok((back, ..)) => format!("moved back to {}", back.display()),
+            Err(stuck) => format!("left at {} ({stuck})", entry.to.display()),
+        };
+        return Err(io::Error::other(format!("journal write failed ({error}); file {back}")));
+    }
+    Ok(Ok(entry))
 }
 
 pub fn load_journal(journal: &Path) -> io::Result<Vec<JournalEntry>> {
@@ -86,16 +111,19 @@ pub fn produced(entries: &[JournalEntry]) -> HashSet<String> {
     entries.iter().map(|e| key(&e.to)).collect()
 }
 
-fn append(journal: &Path, entry: &JournalEntry) -> io::Result<()> {
+fn open_journal(journal: &Path) -> io::Result<fs::File> {
     if let Some(dir) = journal.parent() {
         fs::create_dir_all(dir)?;
     }
-    let mut file = fs::OpenOptions::new().create(true).append(true).open(journal)?;
-    writeln!(file, "{}", serde_json::to_string(entry)?)
+    fs::OpenOptions::new().create(true).append(true).open(journal)
 }
 
-/// Moves to `to`, or "name (2)", "name (3)"… if taken by then. Returns where it landed and its size.
-fn move_file(from: &Path, to: &Path) -> io::Result<(PathBuf, u64)> {
+fn modified(meta: &fs::Metadata) -> u64 {
+    meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as u64)
+}
+
+/// Moves to `to`, or "name (2)", "name (3)"… if taken by then. Returns where it landed, its size and modified time.
+fn move_file(from: &Path, to: &Path) -> io::Result<(PathBuf, u64, u64)> {
     let meta = fs::metadata(from)?;
     if !meta.is_file() {
         return Err(io::Error::other("not a file"));
@@ -110,7 +138,10 @@ fn move_file(from: &Path, to: &Path) -> io::Result<(PathBuf, u64)> {
             result => result,
         };
         match result {
-            Ok(()) => return Ok((candidate, meta.len())),
+            Ok(()) => {
+                let landed = fs::metadata(&candidate).unwrap_or(meta); // FAT may round the copied mtime
+                return Ok((candidate, landed.len(), modified(&landed)));
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
         }
@@ -149,6 +180,7 @@ fn crosses_volumes(error: &io::Error) -> bool {
 }
 
 /// Copy into a new file (never over one), keep modified time, check size, then remove the source.
+/// Source can't be removed (locked) -> our copy is removed instead, so no unjournalled duplicate stays.
 fn copy_across(from: &Path, to: &Path, meta: &fs::Metadata) -> io::Result<()> {
     let mut source = fs::File::open(from)?;
     let mut target = fs::OpenOptions::new().write(true).create_new(true).open(to)?;
@@ -161,7 +193,9 @@ fn copy_across(from: &Path, to: &Path, meta: &fs::Metadata) -> io::Result<()> {
     match copied {
         Ok(copied) if copied == meta.len() && fs::metadata(to)?.len() == meta.len() => {
             drop(source);
-            fs::remove_file(from)
+            fs::remove_file(from).inspect_err(|_| {
+                let _ = fs::remove_file(to);
+            })
         }
         other => {
             let _ = fs::remove_file(to); // our own partial copy, never user data
@@ -258,6 +292,71 @@ mod tests {
         assert_eq!(apply(&plan(&inbox, &rules, &HashSet::new()).unwrap(), &journal).unwrap().done.len(), 1);
         let again = plan(&inbox, &rules, &produced(&load_journal(&journal).unwrap())).unwrap();
         assert!(again.is_empty(), "{again:?}");
+    }
+
+    struct BrokenJournal;
+    impl Write for BrokenJournal {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("disk full"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn journal_failure_leaves_no_unjournalled_move() {
+        let t = Temp::new();
+        let from = t.file("in/a.pdf", b"a");
+        let planned = [Planned { from: from.clone(), to: t.0.join("out/a.pdf"), rule: "r".into() }];
+        // Journal unusable from the start (path is a folder): nothing moves.
+        let folder_journal = t.0.join("in");
+        assert!(apply(&planned, &folder_journal).is_err());
+        assert!(from.exists());
+        // Journal breaks mid-run: the moved file goes back and the run aborts.
+        let error = apply_to(&planned, &mut BrokenJournal).unwrap_err();
+        assert!(error.to_string().contains("moved back"), "{error}");
+        assert_eq!(read(&from), "a");
+        assert!(!t.0.join("out/a.pdf").exists());
+        // Same for undo.
+        let journal = t.0.join("journal.jsonl");
+        let run = apply(&planned, &journal).unwrap();
+        assert!(undo_to(&run.run, &load_journal(&journal).unwrap(), &mut BrokenJournal).is_err());
+        assert_eq!(read(&t.0.join("out/a.pdf")), "a");
+        assert!(!from.exists());
+    }
+
+    #[test]
+    fn undo_skips_same_size_edit() {
+        let t = Temp::new();
+        let journal = t.0.join("journal.jsonl");
+        let from = t.file("in/a.txt", b"abc");
+        let planned = [Planned { from: from.clone(), to: t.0.join("out/a.txt"), rule: "r".into() }];
+        let run = apply(&planned, &journal).unwrap();
+        let moved = &run.done[0].to;
+        fs::write(moved, b"xyz").unwrap();
+        let later = UNIX_EPOCH + std::time::Duration::from_nanos(run.done[0].modified) + std::time::Duration::from_secs(60);
+        fs::File::options().write(true).open(moved).unwrap().set_modified(later).unwrap();
+        let undone = undo(&run.run, &journal).unwrap();
+        assert_eq!(undone.skipped.len(), 1, "{undone:?}");
+        assert_eq!(read(moved), "xyz");
+        assert!(!from.exists());
+    }
+
+    /// A locked source (no delete sharing) must not leave a second copy behind.
+    #[cfg(windows)]
+    #[test]
+    fn cross_volume_copy_keeps_only_source_when_source_is_locked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let t = Temp::new();
+        let from = t.file("a.bin", b"data");
+        let meta = fs::metadata(&from).unwrap();
+        let lock = fs::OpenOptions::new().read(true).share_mode(1).open(&from).unwrap(); // FILE_SHARE_READ only
+        let to = t.0.join("b.bin");
+        assert!(copy_across(&from, &to, &meta).is_err());
+        drop(lock);
+        assert!(!to.exists());
+        assert_eq!(read(&from), "data");
     }
 
     #[test]

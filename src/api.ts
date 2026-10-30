@@ -15,7 +15,7 @@ export type Then = { move_to: string } | { rename: string };
 export type Rule = { id: string; name: string; enabled: boolean; folders: string[]; when: When; then: Then };
 export type WatchedFolder = { path: string; paused: boolean };
 export type Planned = { from: string; to: string; rule: string };
-export type JournalEntry = { run: string; from: string; to: string; at: number; rule: string; size?: number };
+export type JournalEntry = { run: string; from: string; to: string; at: number; rule: string; size?: number; modified?: number };
 
 const tauri = "__TAURI_INTERNALS__" in window;
 
