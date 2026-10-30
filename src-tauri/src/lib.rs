@@ -6,7 +6,7 @@ mod watch;
 
 use std::{
     path::PathBuf,
-    sync::{atomic::Ordering, Arc},
+    sync::Arc,
 };
 
 use model::{JournalEntry, Planned, Rule, WatchedFolder, ACTIVITY_EVENT};
@@ -109,8 +109,8 @@ pub fn run() {
                     "open" => show_main(app),
                     "pause" => {
                         let org = app.state::<Arc<Organizer>>();
-                        let paused = !org.paused.load(Ordering::Relaxed);
-                        org.paused.store(paused, Ordering::Relaxed);
+                        let paused = !org.is_paused();
+                        org.set_paused(paused);
                         let _ = pause.set_checked(paused);
                     }
                     "autostart" => {

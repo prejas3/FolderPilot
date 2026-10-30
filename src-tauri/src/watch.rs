@@ -1,7 +1,10 @@
 //! CCS/1 M:watch | PURPOSE:run rules by themselves: folder events + rescans | DEP:engine,notify
 //! FLOW:notify event -> pending (2 s quiet, then size stable 1 s and not locked) -> plan+apply that folder's ready files -> on_run(entries)
-//! FLOW:a folder starts being watched (app start, folder added, pause lifted) -> full rescan of it; all folders again every hour (age rules)
-//! RULE:global pause or folder.paused -> no watch, no runs; one run at a time (produced lock held across plan+apply)
+//! FLOW:a folder starts being watched (app start, folder added, pause lifted) -> all its files queued as pending; again every hour (age rules)
+//! !RULE:every automatic run goes through pending readiness (quiet/stable/unlocked), rescans included
+//! RULE:global pause or folder.paused -> no watch, no runs; checked again under the run lock right before planning;
+//!   set_paused/set_folders take the same lock, so once they return no run of the old state is still moving files
+//! RULE:one run at a time (produced lock held across plan+apply)
 //! RULE:no loops: files FolderPilot placed (journal `to`) are never planned again (engine::plan produced set)
 use crate::{
     engine::{self, Applied, Undone},
@@ -26,9 +29,9 @@ type OnRun = Box<dyn Fn(&[JournalEntry]) + Send + Sync>;
 
 pub struct Organizer {
     pub rules: Mutex<Vec<Rule>>,
-    pub folders: Mutex<Vec<WatchedFolder>>,
+    folders: Mutex<Vec<WatchedFolder>>,
     /// Tray "Pause all".
-    pub paused: AtomicBool,
+    paused: AtomicBool,
     pub journal: PathBuf,
     produced: Mutex<HashSet<String>>,
     on_run: OnRun,
@@ -46,10 +49,32 @@ impl Organizer {
         })
     }
 
+    pub fn set_paused(&self, paused: bool) {
+        let _run = lock(&self.produced);
+        self.paused.store(paused, Ordering::Relaxed);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    pub fn set_folders(&self, folders: Vec<WatchedFolder>) {
+        let _run = lock(&self.produced);
+        *lock(&self.folders) = folders;
+    }
+
+    pub fn folders(&self) -> Vec<WatchedFolder> {
+        lock(&self.folders).clone()
+    }
+
     /// Plans enabled rules over `folder` and applies them; `only` limits it to those files (keys).
+    /// Nothing runs unless the folder is watched and unpaused at this moment.
     pub fn run_folder(&self, folder: &Path, only: Option<&HashSet<String>>) -> io::Result<Applied> {
         let rules: Vec<Rule> = lock(&self.rules).iter().filter(|rule| rule.enabled).cloned().collect();
         let produced = lock(&self.produced);
+        if !self.active().iter().any(|active| engine::key(active) == engine::key(folder)) {
+            return Ok(Applied::default());
+        }
         let planned: Vec<_> = engine::plan(folder, &rules, &produced)?
             .into_iter()
             .filter(|p| only.is_none_or(|only| only.contains(&engine::key(&p.from))) && !locked(&p.from))
@@ -123,7 +148,7 @@ pub fn spawn(org: Arc<Organizer>) -> notify::Result<()> {
             let added: Vec<PathBuf> = active.difference(&watched).cloned().collect();
             for folder in added {
                 if watcher.watch(&folder, RecursiveMode::NonRecursive).is_ok() {
-                    org.run_logged(&folder, None);
+                    enqueue(&folder, &mut pending, Instant::now());
                     watched.insert(folder);
                 }
             }
@@ -144,7 +169,7 @@ pub fn spawn(org: Arc<Organizer>) -> notify::Result<()> {
             if now >= rescan_at {
                 rescan_at = now + RESCAN;
                 for folder in &watched {
-                    org.run_logged(folder, None);
+                    enqueue(folder, &mut pending, now);
                 }
             }
             let mut by_folder: HashMap<PathBuf, HashSet<String>> = HashMap::new();
@@ -159,6 +184,13 @@ pub fn spawn(org: Arc<Organizer>) -> notify::Result<()> {
         }
     });
     Ok(())
+}
+
+/// Rescan: every file of `folder` becomes pending (kept as is if already pending), checked from `due`.
+fn enqueue(folder: &Path, pending: &mut HashMap<PathBuf, Pending>, due: Instant) {
+    for entry in fs::read_dir(folder).into_iter().flatten().flatten() {
+        pending.entry(entry.path()).or_insert(Pending { due, size: None });
+    }
 }
 
 pub struct Pending {
@@ -286,13 +318,50 @@ mod tests {
         let mut to_a = pdf_rule(&a);
         to_a.folders = vec![b.clone()];
         *lock(&org.rules) = vec![to_b, to_a];
+        org.set_folders([&a, &b].map(|path| WatchedFolder { path: path.clone(), paused: false }).to_vec());
         assert_eq!(org.run_folder(&a, None).unwrap().done.len(), 1);
         assert!(org.run_folder(&b, None).unwrap().done.is_empty());
         assert!(b.join("x.pdf").exists());
         // Same after a restart (produced set rebuilt from the journal).
         let again = Organizer::new(t.0.join("journal.jsonl"), |_| {}).unwrap();
         *lock(&again.rules) = lock(&org.rules).clone();
+        again.set_folders(org.folders());
         assert!(again.run_folder(&b, None).unwrap().done.is_empty());
+    }
+
+    #[test]
+    fn rescan_waits_for_growing_file() {
+        let t = Temp::new();
+        let file = t.file("big.pdf", b"12");
+        let t0 = Instant::now();
+        let mut pending = HashMap::new();
+        enqueue(&t.0, &mut pending, t0);
+        assert!(take_ready(&mut pending, t0).is_empty()); // first size reading
+        fs::write(&file, b"1234").unwrap();
+        assert!(take_ready(&mut pending, t0 + STABLE).is_empty()); // grew
+        assert_eq!(take_ready(&mut pending, t0 + STABLE * 2), std::slice::from_ref(&file));
+    }
+
+    #[test]
+    fn nothing_moves_once_paused() {
+        let t = Temp::new();
+        let (inbox, docs) = (t.0.join("in"), t.0.join("docs"));
+        let file = t.file("in/a.pdf", b"x");
+        let org = Organizer::new(t.0.join("journal.jsonl"), |_| {}).unwrap();
+        *lock(&org.rules) = vec![pdf_rule(&docs)];
+        let watched = |paused| vec![WatchedFolder { path: inbox.clone(), paused }];
+        org.set_folders(watched(false));
+        // A run queued before the pause (ready file, rescan) finds it paused when it starts.
+        org.set_paused(true);
+        assert!(org.run_folder(&inbox, None).unwrap().done.is_empty());
+        org.set_paused(false);
+        org.set_folders(watched(true));
+        assert!(org.run_folder(&inbox, None).unwrap().done.is_empty());
+        org.set_folders(vec![]);
+        assert!(org.run_folder(&inbox, None).unwrap().done.is_empty());
+        assert!(file.exists());
+        org.set_folders(watched(false));
+        assert_eq!(org.run_folder(&inbox, None).unwrap().done.len(), 1);
     }
 
     /// DONE check: a PDF dropped into a watched folder moves by itself within ~5 s.
@@ -304,7 +373,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let org = Arc::new(Organizer::new(t.0.join("journal.jsonl"), move |done| tx.send(done.len()).unwrap()).unwrap());
         *lock(&org.rules) = vec![pdf_rule(&docs)];
-        *lock(&org.folders) = vec![WatchedFolder { path: inbox.clone(), paused: false }];
+        org.set_folders(vec![WatchedFolder { path: inbox.clone(), paused: false }]);
         // The start rescan moving this one shows the watch is live, so the next file goes through events + debounce.
         t.file("in/already-there.pdf", b"%PDF");
         spawn(org.clone()).unwrap();
@@ -319,7 +388,7 @@ mod tests {
         assert!(inbox.join("notes.txt").exists());
         assert!(took >= QUIET + STABLE && took < Duration::from_secs(6), "{took:?}");
         // Paused: a new PDF stays.
-        org.paused.store(true, Ordering::Relaxed);
+        org.set_paused(true);
         t.file("in/later.pdf", b"%PDF");
         assert!(rx.recv_timeout(QUIET + STABLE * 3).is_err());
         assert!(inbox.join("later.pdf").exists());
