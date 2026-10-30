@@ -1,21 +1,21 @@
 #[allow(dead_code, unused_imports)] // CCS/1 TODO:#164 wires engine into the commands
 mod engine;
 pub mod model;
+#[allow(dead_code)] // CCS/1 TODO:#164 commands use Organizer apply/undo/rules/folders
+mod watch;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    path::PathBuf,
+    sync::{atomic::Ordering, Arc},
+};
 
-use model::{JournalEntry, Planned, Rule, WatchedFolder};
+use model::{JournalEntry, Planned, Rule, WatchedFolder, ACTIVITY_EVENT};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager, WindowEvent,
+    Emitter, Manager, WindowEvent,
 };
-
-/// Tray "Pause all": the watcher (card 3) skips every folder while set.
-#[derive(Default)]
-struct AppState {
-    paused: AtomicBool,
-}
+use watch::{autostart, Organizer};
 
 // ponytail: command stubs; engine (card 2) and storage (card 5) fill them in.
 #[tauri::command]
@@ -77,12 +77,26 @@ fn show_main(app: &tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(AppState::default())
         .setup(|app| {
+            let root = std::env::var_os("APPDATA")
+                .map(PathBuf::from)
+                .ok_or("APPDATA is unavailable")?
+                .join("FolderPilot");
+            let handle = app.handle().clone();
+            let org = Arc::new(Organizer::new(root.join("journal.jsonl"), move |done| {
+                let _ = handle.emit(ACTIVITY_EVENT, done);
+            })?);
+            app.manage(org.clone());
+            watch::spawn(org)?;
+            if !std::env::args().any(|arg| arg == autostart::ARG) {
+                show_main(app.handle());
+            }
+
             let open = MenuItem::with_id(app, "open", "Open FolderPilot", true, None::<&str>)?;
             let pause = CheckMenuItem::with_id(app, "pause", "Pause all", true, false, None::<&str>)?;
+            let start = CheckMenuItem::with_id(app, "autostart", "Start with Windows", true, autostart::enabled(), None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &pause, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &pause, &start, &quit])?;
             let icon = app
                 .default_window_icon()
                 .cloned()
@@ -94,10 +108,16 @@ pub fn run() {
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "open" => show_main(app),
                     "pause" => {
-                        let state = app.state::<AppState>();
-                        let paused = !state.paused.load(Ordering::Relaxed);
-                        state.paused.store(paused, Ordering::Relaxed);
+                        let org = app.state::<Arc<Organizer>>();
+                        let paused = !org.paused.load(Ordering::Relaxed);
+                        org.paused.store(paused, Ordering::Relaxed);
                         let _ = pause.set_checked(paused);
+                    }
+                    "autostart" => {
+                        if let Err(error) = autostart::set(!autostart::enabled()) {
+                            eprintln!("folderpilot: autostart: {error}");
+                        }
+                        let _ = start.set_checked(autostart::enabled());
                     }
                     "quit" => app.exit(0),
                     _ => {}
