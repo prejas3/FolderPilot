@@ -34,7 +34,7 @@ pub struct When {
 pub enum Then {
     /// Target folder; "~" is the user's home.
     MoveTo(String),
-    /// New file name, same folder.
+    /// New file name, same folder; {name} is the stem and the extension is kept unless the template has {ext}.
     Rename(String),
 }
 

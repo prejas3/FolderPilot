@@ -75,6 +75,7 @@ fn show_main(app: &tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
         .setup(|app| {
             let open = MenuItem::with_id(app, "open", "Open FolderPilot", true, None::<&str>)?;
