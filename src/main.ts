@@ -1,45 +1,50 @@
-import { api, target, type JournalEntry, type Planned, type Rule, type WatchedFolder, type When } from "./api";
+import { getVersion } from "@tauri-apps/api/app";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { api, target, type JournalEntry, type Planned, type Rule, type Settings, type Theme, type WatchedFolder, type When } from "./api";
+import { lang, setLang, systemLang, t, type Lang } from "./i18n";
+import { icon, type IconName } from "./icons";
+import { menu, select, tooltips } from "./sj-ui.js";
+import appIcon from "../src-tauri/icons/icon.svg";
+import "./sj-ui.css";
 import "./style.css";
 
-// CCS/1 M:ui | FLOW:state -> render() -> innerHTML; clicks via [data-act] delegation | RULE:custom controls only (switch, menu popover, segmented, chips, overlay scrollbar)
+// CCS/1 M:ui | SJ Utility UI pattern B (side nav: Folders, Rules, Preview, Activity | Settings, About)
+// FLOW:state -> render() -> head/body innerHTML; clicks via [data-act] delegation; selects mounted into [data-select] slots
+// RULE:sj-ui controls only (no native select/checkbox/title=/alert); InfoBar (.bars, kept across renders) instead of toasts
+// RULE:every string from i18n.ts; data-act/data-field/data-tip are the E2E hooks (scripts/e2e-auto.mjs)
 
-type View = "folders" | "rules" | "editor" | "preview" | "activity";
+type Page = "folders" | "rules" | "editor" | "preview" | "activity" | "settings" | "about";
+type CondKey = keyof When;
 
-let view: View = "rules";
+const SITE = "https://szymonjankiewicz.com";
+const REPO = "https://github.com/prejas3/FolderPilot";
+const AUTHOR = "Szymon Jankiewicz"; // i18n-ok: a name
+const APP = "FolderPilot"; // i18n-ok: the app name
+
+let page: Page = "rules";
 let rules: Rule[] = [];
 let folders: WatchedFolder[] = [];
 let draft: Rule | null = null;
 let planned: Planned[] | null = null;
 let previewOf = "all";
 let journal: JournalEntry[] = [];
-let hint = read("hint") !== "off";
 let extRow = false;
+let settings: Settings = { lang, theme: (stored("theme") as Theme) ?? "system", autostart: false, paused: false };
+let version = "";
 
-const app = document.querySelector<HTMLElement>("#app")!;
+let nav: HTMLElement;
+let content: HTMLElement;
+let headEl: HTMLElement;
+let bars: HTMLElement;
+let body: HTMLElement;
+/** Select controls built by the page render, mounted into their [data-select] slot. */
+let selects: Record<string, () => HTMLElement> = {};
 
-const icon = (d: string) =>
-  `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
-const icons = {
-  folder: icon('<path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5Z"/>'),
-  rules: icon('<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>'),
-  preview: icon('<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="2.5"/>'),
-  activity: icon('<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>'),
-  plus: icon('<path d="M12 5v14M5 12h14"/>'),
-  grip: icon('<path d="M9 6h.01M15 6h.01M9 12h.01M15 12h.01M9 18h.01M15 18h.01" stroke-width="3"/>'),
-  edit: icon('<path d="M4 20h4L19 9l-4-4L4 16Z"/>'),
-  trash: icon('<path d="M4 7h16M9 7V4.5h6V7M6.5 7l1 13h9l1-13"/>'),
-  x: icon('<path d="M6 6l12 12M18 6 6 18"/>'),
-  undo: icon('<path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>'),
-  info: icon('<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8h.01"/>'),
-  chevron: icon('<path d="m7 10 5 5 5-5"/>'),
-  arrow: icon('<path d="M5 12h14M13 6l6 6-6 6"/>'),
-};
-
-const starters: { label: string; rule: () => Rule }[] = [
-  { label: "PDFs to Documents", rule: () => blank("PDFs to Documents", { ext: ["pdf"] }, { move_to: "~/Documents/PDF" }) },
-  { label: "Photos by date", rule: () => blank("Photos by date", { ext: ["jpg", "jpeg", "png", "heic"] }, { move_to: "~/Pictures/{year}/{month}" }) },
-  { label: "Rename with date", rule: () => blank("Rename with date", { ext: ["pdf", "docx"] }, { rename: "{year}-{month}-{day} {name}" }) },
-  { label: "Archive older than 90 days", rule: () => blank("Archive old files", { older_than_days: 90 }, { move_to: "D:/Archive/{year}" }) },
+const starters: { key: keyof typeof t.starters; rule: (name: string) => Rule }[] = [
+  { key: "pdf", rule: (n) => blank(n, { ext: ["pdf"] }, { move_to: "~/Documents/PDF" }) },
+  { key: "photos", rule: (n) => blank(n, { ext: ["jpg", "jpeg", "png", "heic"] }, { move_to: "~/Pictures/{year}/{month}" }) },
+  { key: "rename", rule: (n) => blank(n, { ext: ["pdf", "docx"] }, { rename: "{year}-{month}-{day} {name}" }) },
+  { key: "archive", rule: (n) => blank(n, { older_than_days: 90 }, { move_to: "D:/Archive/{year}" }) },
 ];
 
 function blank(name = "", when: Partial<When> = {}, then: Rule["then"] = { move_to: "" }): Rule {
@@ -53,220 +58,266 @@ function blank(name = "", when: Partial<When> = {}, then: Rule["then"] = { move_
   };
 }
 
-// ---------- render ----------
+// ---------- markup helpers (sj-ui.css components) ----------
+
+type Attrs = Record<string, string | number | boolean | undefined>;
+const attrs = (a: Attrs = {}) =>
+  Object.entries(a).filter(([, v]) => v !== undefined && v !== false).map(([k, v]) => (v === true ? ` ${k}` : ` ${k}="${esc(String(v))}"`)).join("");
+
+function btn(label: string, act: string, o: { cls?: string; ic?: IconName; tip?: string; a?: Attrs } = {}) {
+  const tip = o.tip ? { "data-tip": o.tip, "aria-label": o.tip } : {};
+  return `<button type="button" class="${o.cls ?? "btn"}" data-act="${act}"${attrs({ ...tip, ...o.a })}>${o.ic ? icon(o.ic) : ""}${label ? `<span>${esc(label)}</span>` : ""}</button>`;
+}
+const iconBtn = (ic: IconName, tip: string, act: string, a: Attrs = {}, cls = "") => btn("", act, { cls: `btn subtle square ${cls}`.trim(), ic, tip, a });
+
+/** Toggle; `state` shows On/Off before the track (settings cards only). */
+const toggle = (on: boolean, label: string, act: string, a: Attrs = {}, state = false) =>
+  `<button type="button" class="toggle" role="switch" aria-checked="${on}" aria-label="${esc(label)}" data-act="${act}"${attrs(a)}>${state ? `<span>${on ? t.on : t.off}</span>` : ""}<i></i></button>`;
+
+const check = (on: boolean, label: string, act: string, a: Attrs = {}) =>
+  `<button type="button" class="check" role="checkbox" aria-checked="${on}" data-act="${act}"${attrs(a)}><i>${icon("check")}</i><span>${esc(label)}</span></button>`;
+
+const field = (key: string, value: string, label: string, o: { placeholder?: string; cls?: string; suffix?: string; tip?: string } = {}) =>
+  `<label class="field ${o.cls ?? ""}"${attrs({ "data-tip": o.tip })}><input data-field="${key}"${attrs({ value, "aria-label": label, placeholder: o.placeholder })} autocomplete="off" spellcheck="false">${o.suffix ? `<span class="suffix">${esc(o.suffix)}</span>` : ""}</label>`;
+
+const card = (ic: IconName | null, title: string, text: string, controls: string, cls = "") =>
+  `<div class="card ${cls}">${ic ? icon(ic) : ""}<div class="card-text"><h3>${esc(title)}</h3>${text ? `<p>${esc(text)}</p>` : ""}</div><div class="card-ctl">${controls}</div></div>`;
+
+const group = (title: string, items: string) =>
+  `<section class="group"${attrs({ "aria-label": title || undefined })}>${title ? `<h2 class="group-title">${esc(title)}</h2>` : ""}${items}</section>`;
+
+const empty = (text: string) => `<p class="empty t-2">${esc(text)}</p>`;
+
+function slot(id: string, make: () => HTMLElement) {
+  selects[id] = make;
+  return `<span data-select="${id}"></span>`;
+}
+
+// ---------- shell ----------
+
+function build() {
+  document.documentElement.lang = lang;
+  const item = (p: Page, ic: IconName) =>
+    `<button type="button" class="nav-item" data-act="go" data-v="${p}" aria-label="${esc(t[p as keyof typeof t] as string)}">${icon(ic).replace('class="icon"', 'class="icon off"')}${icon(`${ic}On` as IconName).replace('class="icon"', 'class="icon on"')}<span>${esc(t[p as keyof typeof t] as string)}</span></button>`;
+  document.body.innerHTML = `
+    <nav class="nav" aria-label="${esc(t.nav)}">
+      ${iconBtn("menu", t.nav, "nav-menu", { "aria-expanded": "false" }, "menu-btn")}
+      ${item("folders", "folder")}${item("rules", "rules")}${item("preview", "preview")}${item("activity", "activity")}
+      <div class="nav-spacer"></div>
+      ${item("settings", "settings")}${item("about", "about")}
+    </nav>
+    <main class="content"><div class="page"><header class="page-head"></header><div class="bars"></div><div class="body"></div></div></main>`;
+  nav = document.querySelector(".nav")!;
+  content = document.querySelector(".content")!;
+  headEl = content.querySelector(".page-head")!;
+  bars = content.querySelector(".bars")!;
+  body = content.querySelector(".body")!;
+  navTips();
+  render();
+}
+
+const compact = matchMedia("(width < 640px)");
+compact.addEventListener("change", navTips);
+function navTips() {
+  nav?.querySelectorAll<HTMLElement>(".nav-item").forEach((b) => {
+    if (compact.matches) b.dataset.tip = b.getAttribute("aria-label") ?? "";
+    else delete b.dataset.tip;
+  });
+}
 
 function render() {
-  const nav = (v: View, label: string, ic: string) =>
-    `<button class="nav" data-act="go" data-v="${v}" aria-label="${label}" ${view === v || (v === "rules" && view === "editor") ? 'aria-current="page"' : ""}>${ic}<span>${label}</span></button>`;
-  const scroller = app.querySelector(".scroll");
-  const top = scroller?.scrollTop ?? 0;
-  app.innerHTML = `
-    <nav class="side">
-      <div class="brand">${logo()}<span>FolderPilot</span></div>
-      ${nav("folders", "Folders", icons.folder)}
-      ${nav("rules", "Rules", icons.rules)}
-      ${nav("preview", "Preview", icons.preview)}
-      ${nav("activity", "Activity", icons.activity)}
-    </nav>
-    <main class="main"><div class="scroll"><div class="page">${page()}</div></div><div class="thumb"></div></main>`;
-  for (const el of app.querySelectorAll<HTMLElement>("[data-anchor]")) {
-    el.style.setProperty(el.matches("[popover]") ? "position-anchor" : "anchor-name", `--${el.dataset.anchor}`);
-  }
-  if (view === "editor" && previousView === "editor") app.querySelector(".scroll")!.scrollTop = top;
-  previousView = view;
-  scrollbar();
-}
-let previousView: View = view;
-
-function page() {
-  switch (view) {
-    case "folders": return foldersPage();
-    case "rules": return rulesPage();
-    case "editor": return editorPage(draft!);
-    case "preview": return previewPage();
-    case "activity": return activityPage();
-  }
+  if (!body) return;
+  const focus = focusKey(document.activeElement);
+  const current = page === "editor" ? "rules" : page;
+  nav.querySelectorAll(".nav-item").forEach((b) => b.removeAttribute("aria-current"));
+  nav.querySelector(`[data-v="${current}"]`)?.setAttribute("aria-current", "page");
+  selects = {};
+  const [title, lede, actions, html] = pages[page]();
+  headEl.innerHTML = `<div><h1 class="t-title">${esc(title)}</h1>${lede ? `<p class="t-2 lede">${esc(lede)}</p>` : ""}</div>${actions ? `<div class="head-actions">${actions}</div>` : ""}`;
+  body.innerHTML = html;
+  for (const el of content.querySelectorAll<HTMLElement>("[data-select]")) el.replaceWith(selects[el.dataset.select!]());
+  pausedBar();
+  if (focus) content.querySelector<HTMLElement>(focus)?.focus();
 }
 
-const head = (title: string, action = "") => `<header class="head"><h1>${title}</h1>${action}</header>`;
-
-function foldersPage() {
-  const list = folders.length
-    ? `<ul class="list">${folders.map((f, i) => `
-        <li class="card row">
-          <span class="ic">${icons.folder}</span>
-          <span class="grow"><span class="name">${esc(tail(f.path, 1))}</span>
-            <span class="sub" title="${esc(f.path)}">${f.paused ? "Paused" : "Watching"} – ${esc(f.path)}</span></span>
-          ${toggle(!f.paused, "folder-pause", i, `Watch ${f.path}`)}
-          <button class="icon-btn" data-act="folder-remove" data-i="${i}" aria-label="Stop watching ${esc(f.path)}">${icons.trash}</button>
-        </li>`).join("")}</ul>`
-    : empty("No folders yet", "Pick a folder like Downloads and FolderPilot will keep it tidy.");
-  return head("Folders", `<button class="primary" data-act="folder-add">${icons.plus}<span>Add folder</span></button>`) + list;
+/** A selector that finds the same control after a re-render, so keyboard focus stays put. */
+function focusKey(el: Element | null) {
+  if (!(el instanceof HTMLElement) || !content?.contains(el)) return "";
+  const keys = ["data-act", "data-i", "data-k", "data-field", "aria-label"].filter((k) => el.hasAttribute(k));
+  return keys.length ? keys.map((k) => `[${k}="${CSS.escape(el.getAttribute(k)!)}"]`).join("") : "";
 }
 
-function rulesPage() {
-  const tip = hint
-    ? `<p class="hint">${icons.info}<span>Rules run top to bottom and the first match wins. Drag to reorder.</span>
-         <button class="icon-btn" data-act="hint-off" aria-label="Hide tip">${icons.x}</button></p>`
-    : "";
-  const list = rules.length
-    ? `<ul class="list">${rules.map((r, i) => `
-        <li class="card rule" draggable="true" data-i="${i}">
-          <button class="grip" data-act="noop" data-i="${i}" aria-label="Move ${esc(r.name)}; use arrow keys">${icons.grip}</button>
-          ${toggle(r.enabled, "rule-toggle", i, `Enable ${r.name}`)}
-          <span class="grow">
-            <span class="name">${esc(r.name || "Untitled rule")}</span>
-            <span class="sub">${esc(whenText(r))}</span>
-            <span class="then">${icons.arrow}<span>${esc(thenText(r))}</span></span>
-          </span>
-          <button class="icon-btn" data-act="rule-edit" data-i="${i}" aria-label="Edit ${esc(r.name)}">${icons.edit}</button>
-          <button class="icon-btn" data-act="rule-delete" data-i="${i}" aria-label="Delete ${esc(r.name)}">${icons.trash}</button>
-        </li>`).join("")}</ul>`
-    : `${empty("No rules yet", "Start from an example or write your own.")}
-       <div class="starters">${starters.map((s, i) => `<button class="starter" data-act="starter" data-i="${i}">${esc(s.label)}</button>`).join("")}</div>`;
-  const newMenu = menu("new-rule", `${icons.plus}<span>New rule</span>`, "primary", [
-    ["blank", "", "Blank rule"],
-    ...starters.map((s, i) => ["starter", String(i), s.label] as [string, string, string]),
-  ]);
-  return head("Rules", newMenu) + tip + list;
+function setPage(next: Page) {
+  if (next !== page) bars.replaceChildren();
+  page = next;
+  store("page", next === "editor" ? "rules" : next);
+  nav.classList.remove("open");
+  render();
+  content.scrollTop = 0;
+  if (next === "activity") void refreshActivity();
 }
 
-function editorPage(r: Rule) {
+// ---------- pages: [title, lede, head actions, body] ----------
+
+const pages: Record<Page, () => [string, string, string, string]> = {
+  folders: () => {
+    const list = folders.length
+      ? group("", folders.map((f, i) => card("folder", tail(f.path, 1), f.path,
+          toggle(!f.paused, t.watch(f.path), "folder-pause", { "data-i": i }, true) +
+          iconBtn("delete", t.stopWatching(f.path), "folder-remove", { "data-i": i }))).join(""))
+      : empty(t.foldersEmpty);
+    return [t.folders, t.foldersLede, btn(t.addFolder, "folder-add", { cls: "btn accent", ic: "add" }), list];
+  },
+  rules: () => {
+    const list = rules.length
+      ? `<ul class="rules">${rules.map((r, i) => `
+          <li class="card rule" draggable="true" data-i="${i}">
+            ${iconBtn("drag", t.reorder(r.name || t.untitled), "noop", { "data-i": i }, "grip")}
+            <div class="card-text">
+              <h3 class="name">${esc(r.name || t.untitled)}</h3>
+              <p>${esc(whenText(r))}</p>
+              <p class="then">${icon("arrow")}<span>${esc(thenText(r))}</span></p>
+            </div>
+            <div class="card-ctl">
+              ${toggle(r.enabled, t.enable(r.name || t.untitled), "rule-toggle", { "data-i": i })}
+              ${iconBtn("edit", t.edit(r.name || t.untitled), "rule-edit", { "data-i": i })}
+              ${iconBtn("delete", t.remove(r.name || t.untitled), "rule-delete", { "data-i": i })}
+            </div>
+          </li>`).join("")}</ul>`
+      : empty(t.rulesEmpty);
+    return [t.rules, t.rulesLede, btn(t.newRule, "new-rule", { cls: "btn accent", ic: "add", a: { "aria-haspopup": "menu" } }), list];
+  },
+  editor: () => editorPage(draft!),
+  preview: () => {
+    const options: [string, string][] = [["all", t.allEnabled], ...rules.map((r) => [r.id, r.name || t.untitled] as [string, string])];
+    if (draft && !rules.some((r) => r.id === draft!.id)) options.push([draft.id, t.unsaved(draft.name || t.untitled)]);
+    if (!options.some(([v]) => v === previewOf)) previewOf = "all";
+    const picker = slot("preview-of", () => select({
+      options: options.map(([value, label]) => ({ value, label })), value: previewOf, label: t.previewOf,
+      onChange: (v: string) => { previewOf = v; planned = null; render(); },
+    }));
+    const has = !!planned?.length;
+    const html = planned === null
+      ? empty(t.previewEmpty)
+      : planned.length
+        ? `${group("", `<ul class="moves card">${planned.map(move).join("")}</ul>`)}
+           <footer class="foot"><span class="t-2">${esc(t.wouldMove(planned.length))}</span>${btn(t.apply, "apply", { cls: "btn accent" })}</footer>`
+        : empty(t.noMatches);
+    return [t.preview, t.previewLede, picker + btn(t.runPreview, "run-preview", { cls: has ? "btn" : "btn accent" }), html];
+  },
+  activity: () => {
+    const runs = new Map<string, JournalEntry[]>();
+    for (const e of [...journal].reverse()) runs.set(e.run, [...(runs.get(e.run) ?? []), e]);
+    // Engine journals an undo as run "undo-<run>": it gets no button, and its run shows as undone.
+    const html = runs.size
+      ? `<div class="runs">${[...runs].map(([run, entries]) => {
+          const isUndo = run.startsWith("undo-");
+          const undone = runs.has(`undo-${run}`);
+          const side = isUndo ? "" : undone ? `<span class="t-2">${esc(t.undone)}</span>` : btn(t.undo, "undo", { ic: "undo", a: { "data-k": run } });
+          return `<section class="card run"${attrs({ "data-undone": undone })}>
+            <div class="run-head"><div class="card-text"><h3 class="num">${esc(when(entries[0].at))}</h3>
+              <p>${esc(isUndo ? t.movedBack(entries.length) : t.moved(entries.length))}</p></div>${side}</div>
+            <ul class="moves">${entries.map(move).join("")}</ul></section>`;
+        }).join("")}</div>`
+      : empty(t.activityEmpty);
+    return [t.activity, t.activityLede, "", html];
+  },
+  settings: () => {
+    const langSel = slot("lang", () => select({
+      options: [{ value: "pl", label: "Polski" }, { value: "en", label: "English" }], // i18n-ok: language names
+      value: lang, label: t.language, onChange: (v: string) => void changeLang(v as Lang),
+    }));
+    const themeSel = slot("theme", () => select({
+      options: (["system", "light", "dark"] as Theme[]).map((v) => ({ value: v, label: t.themes[v] })),
+      value: settings.theme, label: t.theme,
+      onChange: (v: string) => { settings.theme = v as Theme; store("theme", v); applyTheme(); void api.setTheme(settings.theme).catch(fail(t.saveFailed)); },
+    }));
+    return [t.settings, "", "", [
+      group(t.general,
+        card("power", t.startWithWindows, t.startText, toggle(settings.autostart, t.startWithWindows, "autostart", {}, true)) +
+        card("language", t.language, t.languageText, langSel) +
+        card("theme", t.theme, t.themeText, themeSel)),
+      group(APP,
+        card("pauseAll", t.pauseAll, t.pauseText, toggle(settings.paused, t.pauseAll, "pause-all", {}, true))),
+      group(t.advanced,
+        card("folderOpen", t.dataFolder, t.dataFolderText, btn(t.openFolder, "open", { a: { "data-k": "data" } }))),
+    ].join("")];
+  },
+  about: () => {
+    const link = (ic: IconName, title: string, url: string) =>
+      `<button type="button" class="card" data-act="open" data-k="${esc(url)}">${icon(ic)}<span class="card-text"><span>${esc(title)}</span><p>${esc(url.replace("https://", ""))}</p></span>${icon("open")}</button>`;
+    return ["", "", "", `
+      <div class="about-head"><img src="${appIcon}" width="48" height="48" alt="">
+        <div><h1 class="t-subtitle">${APP}</h1><p class="t-caption t-2">${esc(version ? t.version(version) : "")}</p></div></div>
+      <p class="t-2">${esc(t.aboutText)}</p>
+      <p><button type="button" class="link" data-act="open" data-k="${SITE}">${AUTHOR}</button></p>
+      ${group("", link("globe", t.projectPage, `${SITE}/p/folderpilot`) + link("code", t.source, REPO) + link("bug", t.issues, `${REPO}/issues`) + link("document", t.licence, `${REPO}/blob/main/LICENSE`))}`];
+  },
+};
+
+function editorPage(r: Rule): [string, string, string, string] {
   const isMove = "move_to" in r.then;
-  const template = isMove ? (r.then as { move_to: string }).move_to : (r.then as { rename: string }).rename;
+  const template = Object.values(r.then)[0] as string;
   const w = r.when;
   const conds: string[] = [];
-  if (extRow) conds.push(cond("ext", "is a", field("ext", w.ext.join(", "), "pdf, docx"), "file type"));
-  if (w.name_glob !== null) conds.push(cond("name_glob", "has a name matching", field("name_glob", w.name_glob, "*invoice*")));
-  if (w.older_than_days !== null) conds.push(cond("older_than_days", "is older than", field("older_than_days", String(w.older_than_days), "90", "num"), "days"));
-  if (w.min_size !== null) conds.push(cond("min_size", "is bigger than", field("min_size", mb(w.min_size), "10", "num"), "MB"));
-  if (w.max_size !== null) conds.push(cond("max_size", "is smaller than", field("max_size", mb(w.max_size), "1", "num"), "MB"));
-  const add = menu("add-cond", `${icons.plus}<span>Add condition</span>`, "ghost", ([
-    ["ext", "File type"], ["name_glob", "Name matches"], ["older_than_days", "Older than"], ["min_size", "Bigger than"], ["max_size", "Smaller than"],
-  ] as const).filter(([k]) => (k === "ext" ? !extRow : w[k] === null)).map(([k, label]) => ["cond-add", k, label]));
-  if (!conds.length) conds.push(`<div class="line"><span class="word">is any file</span></div>`);
+  const cond = (key: CondKey, input: string) =>
+    `<div class="cond" data-k="${key}"><span class="cond-label">${esc(t.conds[key])}</span>${input}${iconBtn("dismiss", t.removeCondition, "cond-remove", { "data-k": key })}</div>`;
+  if (extRow) conds.push(cond("ext", field("ext", w.ext.join(", "), t.conds.ext, { placeholder: "pdf, docx", cls: "grow" })));
+  if (w.name_glob !== null) conds.push(cond("name_glob", field("name_glob", w.name_glob, t.conds.name_glob, { placeholder: "*invoice*", cls: "grow", tip: t.globHint })));
+  if (w.older_than_days !== null) conds.push(cond("older_than_days", field("older_than_days", String(w.older_than_days), t.conds.older_than_days, { placeholder: "90", cls: "number", suffix: t.days })));
+  if (w.min_size !== null) conds.push(cond("min_size", field("min_size", mb(w.min_size), t.conds.min_size, { placeholder: "10", cls: "number", suffix: t.mb })));
+  if (w.max_size !== null) conds.push(cond("max_size", field("max_size", mb(w.max_size), t.conds.max_size, { placeholder: "1", cls: "number", suffix: t.mb })));
+  const canAdd = (Object.keys(t.condMenu) as CondKey[]).some((k) => (k === "ext" ? !extRow : w[k] === null));
+  const action = slot("action", () => select({
+    options: (["move_to", "rename"] as const).map((k) => ({ value: k, label: t.actions[k] })), value: isMove ? "move_to" : "rename", label: t.then,
+    onChange: (v: string) => { draft!.then = v === "move_to" ? { move_to: template } : { rename: template }; render(); },
+  }));
   const sample = sampleFile(r);
-  return `
-    ${head(rules.some((x) => x.id === r.id) ? "Edit rule" : "New rule")}
-    <section class="sentence">
-      <label class="name-field"><span>Name</span>
-        <input class="input" data-field="name" value="${esc(r.name)}" placeholder="PDFs to Documents" autocomplete="off"></label>
-      <div class="line"><span class="word">When a file in</span>
-        <span class="chips">${chip("All folders", !r.folders.length, "folder-all", "")}
-          ${folders.map((f) => chip(tail(f.path, 1), r.folders.includes(f.path), "folder-chip", f.path)).join("")}</span></div>
-      ${conds.join('<div class="and">and</div>')}
-      <div class="line">${add}</div>
-      <div class="line then-line">
-        <div class="seg" role="radiogroup" aria-label="Action">
-          <button role="radio" aria-checked="${isMove}" data-act="then" data-k="move_to">Move to</button>
-          <button role="radio" aria-checked="${!isMove}" data-act="then" data-k="rename">Rename to</button>
-        </div>
-        <input class="input grow" data-field="template" value="${esc(template)}" placeholder="${isMove ? "~/Documents/PDF" : "{year}-{month}-{day} {name}"}" autocomplete="off" spellcheck="false">
-      </div>
-      <div class="tokens" aria-label="Insert into ${isMove ? "folder" : "name"}">
-        ${["name", "ext", "year", "month", "day", "counter"].map((t) => `<button class="token" data-act="token" data-k="${t}">{${t}}</button>`).join("")}
-      </div>
-      <p class="example" aria-live="polite"><span class="file">${esc(sample)}</span>${icons.arrow}<span class="dest">${esc(template ? short(target(r, "~/Downloads", sample)) : "…")}</span></p>
-    </section>
-    <footer class="actions">
-      <button class="ghost" data-act="cancel">Cancel</button>
-      <button class="ghost" data-act="try">Preview</button>
-      <button class="primary" data-act="save" ${template.trim() ? "" : "disabled"}>Save rule</button>
-    </footer>`;
-}
-
-function cond(key: string, label: string, input: string, unit = "") {
-  return `<div class="line cond" data-k="${key}"><span class="word">${label}</span>${input}${unit ? `<span class="word">${unit}</span>` : ""}
-    <button class="icon-btn" data-act="cond-remove" data-k="${key}" aria-label="Remove condition">${icons.x}</button></div>`;
-}
-
-function field(key: string, value: string, placeholder: string, kind = "") {
-  const num = kind === "num" ? ' inputmode="numeric" class="input num"' : ' class="input"';
-  return `<input${num} data-field="${key}" value="${esc(value)}" placeholder="${placeholder}" autocomplete="off" spellcheck="false">`;
-}
-
-function previewPage() {
-  const options: [string, string, string][] = [["preview-of", "all", "All enabled rules"], ...rules.map((r) => ["preview-of", r.id, r.name || "Untitled rule"] as [string, string, string])];
-  if (draft && !rules.some((r) => r.id === draft!.id)) options.push(["preview-of", draft.id, `${draft.name || "Untitled rule"} (unsaved)`]);
-  const current = options.find((o) => o[1] === previewOf)?.[2] ?? "All enabled rules";
-  const picker = menu("preview-pick", `<span>${esc(current)}</span>${icons.chevron}`, "select", options);
-  const body = planned === null
-    ? empty("Nothing previewed yet", "Pick rules and run a preview. Nothing moves until you apply.")
-    : planned.length
-      ? `<ul class="list moves">${planned.map((p) => move(p)).join("")}</ul>
-         <footer class="actions"><span class="sub">${planned.length} ${planned.length === 1 ? "file" : "files"} would move</span>
-           <button class="primary" data-act="apply">Apply</button></footer>`
-      : empty("No files match", "These rules would not touch anything right now.");
-  return head("Preview", `<div class="head-tools">${picker}<button class="primary" data-act="run-preview">Run preview</button></div>`) + body;
-}
-
-function activityPage() {
-  const runs = new Map<string, JournalEntry[]>();
-  for (const e of [...journal].reverse()) runs.set(e.run, [...(runs.get(e.run) ?? []), e]);
-  // Engine journals an undo as run "undo-<run>": it gets no button, and its run shows as undone.
-  const files = (n: number) => `${n} ${n === 1 ? "file" : "files"}`;
-  const body = runs.size
-    ? `<ul class="list">${[...runs].map(([run, entries]) => `
-        <li class="card run">
-          <div class="run-head">
-            <span class="grow"><span class="name">${when(entries[0].at)}</span>
-              <span class="sub">${run.startsWith("undo-") ? `Undo: ${files(entries.length)} moved back` : `${files(entries.length)} moved`}</span></span>
-            ${run.startsWith("undo-") ? "" : runs.has(`undo-${run}`)
-              ? `<span class="sub">Undone</span>`
-              : `<button class="ghost" data-act="undo" data-k="${esc(run)}">${icons.undo}<span>Undo</span></button>`}
-          </div>
-          <ul class="moves">${entries.map((p) => move(p)).join("")}</ul>
-        </li>`).join("")}</ul>`
-    : empty("No activity yet", "Moves and renames show up here, and every run can be undone.");
-  return head("Activity") + body;
+  const html = `
+    ${group(t.name, `<div class="card form">${field("name", r.name, t.name, { placeholder: t.starters.pdf })}</div>`)}
+    ${group(t.whenIn, `<div class="card form">
+      <div class="checks">${check(!r.folders.length, t.allFolders, "folder-all")}
+        ${folders.map((f) => check(r.folders.includes(f.path), tail(f.path, 1), "folder-check", { "data-k": f.path, "data-tip": f.path })).join("")}</div>
+      ${conds.length ? `<div class="conds">${conds.join("")}</div>` : `<p class="t-2">${esc(t.anyFile)}</p>`}
+      ${canAdd ? `<div>${btn(t.addCondition, "add-cond", { cls: "btn subtle", ic: "add", a: { "aria-haspopup": "menu" } })}</div>` : ""}
+    </div>`)}
+    ${group(t.then, `<div class="card form">
+      <div class="then-row">${action}${field("template", template, isMove ? t.folderField : t.nameField, { placeholder: isMove ? "~/Documents/PDF" : "{year}-{month}-{day} {name}", cls: "grow" })}</div>
+      <div class="tokens" role="group" aria-label="${esc(isMove ? t.tokensFolder : t.tokensName)}">
+        ${["name", "ext", "year", "month", "day", "counter"].map((k) => btn(`{${k}}`, "token", { cls: "btn subtle token", a: { "data-k": k } })).join("")}</div>
+      <p class="example" aria-live="polite" aria-label="${esc(t.example)}"><span class="file">${esc(sample)}</span>${icon("arrow")}<span class="dest">${esc(template ? short(target(r, "~/Downloads", sample)) : "…")}</span></p>
+    </div>`)}
+    <footer class="foot">${btn(t.cancel, "cancel")}${btn(t.tryIt, "try")}${btn(t.saveRule, "save", { cls: "btn accent", a: { disabled: !template.trim() } })}</footer>`;
+  return [rules.some((x) => x.id === r.id) ? t.editTitle : t.newTitle, "", "", html];
 }
 
 const move = (p: { from: string; to: string }) =>
-  `<li class="move"><span class="file" title="${esc(p.from)}">${esc(tail(p.from, 2))}</span>${icons.arrow}<span class="dest" title="${esc(p.to)}">${esc(tail(p.to, 3))}</span></li>`;
-
-const empty = (title: string, text: string) => `<div class="empty"><p class="name">${title}</p><p class="sub">${text}</p></div>`;
-
-const toggle = (on: boolean, act: string, i: number, label: string) =>
-  `<button class="switch" role="switch" aria-checked="${on}" data-act="${act}" data-i="${i}" aria-label="${esc(label)}"></button>`;
-
-const chip = (label: string, on: boolean, act: string, k: string) =>
-  `<button class="chip" aria-pressed="${on}" data-act="${act}" data-k="${esc(k)}" title="${esc(k)}">${esc(label)}</button>`;
-
-function menu(id: string, label: string, cls: string, items: [string, string, string][]) {
-  return `<button class="${cls}" popovertarget="m-${id}" data-anchor="m-${id}">${label}</button>
-    <div class="menu" popover id="m-${id}" data-anchor="m-${id}" role="menu">
-      ${items.map(([act, k, text]) => `<button role="menuitem" data-act="${act}" data-k="${esc(k)}">${esc(text)}</button>`).join("")}
-    </div>`;
-}
-
-function logo() {
-  return `<svg viewBox="0 0 512 512" aria-hidden="true"><rect width="512" height="512" rx="112" fill="var(--logo-bg)"/><path d="M96 160h120l32 40h168v192H96Z" fill="var(--accent)"/><path d="M200 296h96l-32-32m32 32-32 32" stroke="var(--logo-bg)" stroke-width="28" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-}
+  `<li class="move"><span class="file" data-tip="${esc(p.from)}">${esc(tail(p.from, 2))}</span>${icon("arrow")}<span class="dest" data-tip="${esc(p.to)}">${esc(tail(p.to, 3))}</span></li>`;
 
 // ---------- text ----------
 
 function whenText(r: Rule) {
   const w = r.when;
   const parts = [
-    w.ext.length && `Type is ${w.ext.join(", ")}`,
-    w.name_glob && `Name matches "${w.name_glob}"`,
-    w.older_than_days !== null && `Older than ${w.older_than_days} days`,
-    w.min_size !== null && `Bigger than ${mb(w.min_size)} MB`,
-    w.max_size !== null && `Smaller than ${mb(w.max_size)} MB`,
+    w.ext.length && t.typeIs(w.ext.join(", ")),
+    w.name_glob && t.nameIs(w.name_glob),
+    w.older_than_days !== null && t.olderIs(w.older_than_days),
+    w.min_size !== null && t.biggerIs(mb(w.min_size)),
+    w.max_size !== null && t.smallerIs(mb(w.max_size)),
   ].filter(Boolean);
-  const where = r.folders.length ? ` in ${r.folders.map(short).join(", ")}` : "";
-  return (parts.length ? parts.join(" and ") : "Any file") + where;
+  const where = r.folders.length ? t.inFolders(r.folders.map((p) => tail(p, 1)).join(", ")) : "";
+  return (parts.length ? parts.join(t.and) : t.anyFile) + where;
 }
 
-const thenText = (r: Rule) => ("move_to" in r.then ? `Move to ${short(r.then.move_to) || "…"}` : `Rename to ${r.then.rename || "…"}`);
+const thenText = (r: Rule) => ("move_to" in r.then ? t.moveTo(short(r.then.move_to) || "…") : t.renameTo(r.then.rename || "…"));
 
 function sampleFile(r: Rule) {
   const ext = r.when.ext[0] ?? "pdf";
-  const stem = ["jpg", "jpeg", "png", "heic"].includes(ext) ? "IMG_2041" : ext === "pdf" ? "invoice" : "report";
+  const stem = ["jpg", "jpeg", "png", "heic"].includes(ext) ? "IMG_2041" : ext === "pdf" ? "invoice" : "report"; // i18n-ok: sample file names
   return `${stem}.${ext}`;
 }
 
-/** Last `n` path segments ("…/Documents/PDF/a.pdf"); full path goes in a title. */
+/** Last `n` path segments ("…/Documents/PDF/a.pdf"); the full path goes in a tooltip. */
 const tail = (p: string, n: number) => {
   const parts = p.split(/[\\/]/).filter(Boolean);
   return parts.length > n ? `…/${parts.slice(-n).join("/")}` : parts.join("/");
@@ -274,124 +325,192 @@ const tail = (p: string, n: number) => {
 const short = (p: string) => p.replace(/^~[\\/]?/, "").replace(/\\/g, "/");
 const mb = (bytes: number) => String(+(bytes / 1048576).toFixed(2));
 const when = (at: number) =>
-  new Date(at * 1000).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  new Date(at * 1000).toLocaleString(lang === "pl" ? "pl-PL" : "en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
 function esc(s: string) {
-  return s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+  return s.replace(/[&<>\x22\x27]/g, (c) => `&#${c.charCodeAt(0)};`); // \x22\x27 = quotes, kept out of the i18n scanner
 }
 
-function read(key: string) {
+function stored(key: string) {
   try { return localStorage.getItem(key); } catch { return null; }
+}
+function store(key: string, value: string) {
+  try { localStorage.setItem(key, value); } catch { /* private mode */ }
+}
+
+// ---------- InfoBar ----------
+
+type Kind = "ok" | "warn" | "err" | "info";
+/** InfoBar (spec 6), the stand-in for toasts. With `id` it replaces that bar and has no ×. */
+function say(kind: Kind, title: string, text = "", o: { id?: string; action?: [string, () => void] } = {}) {
+  if (o.id) bars.querySelector(`#${o.id}`)?.remove();
+  const bar = document.createElement("div");
+  bar.className = `infobar ${kind}`;
+  bar.setAttribute("role", kind === "err" ? "alert" : "status");
+  if (o.id) bar.id = o.id;
+  bar.innerHTML = `${icon(kind === "info" ? "info" : kind)}<p class="infobar-text"><b>${esc(title)}</b><span>${esc(text)}</span></p>`;
+  if (o.action) {
+    const [label, run] = o.action;
+    const b = Object.assign(document.createElement("button"), { type: "button", className: "btn", textContent: label });
+    b.addEventListener("click", () => { if (!o.id) bar.remove(); run(); });
+    bar.append(b);
+  }
+  if (!o.id) {
+    bar.insertAdjacentHTML("beforeend", iconBtn("dismiss", t.dismiss, "noop"));
+    bar.lastElementChild!.addEventListener("click", () => bar.remove());
+  }
+  bars.append(bar);
+  // Keep the stack short: the oldest closable bars go first.
+  const closable = [...bars.children].filter((el) => !el.id);
+  closable.slice(0, Math.max(0, closable.length - 3)).forEach((el) => el.remove());
+}
+
+const fail = (title: string) => (error: unknown) => say("err", title, String(error));
+
+function pausedBar() {
+  const show = settings.paused && (page === "folders" || page === "rules");
+  if (!show) bars.querySelector("#paused")?.remove();
+  else if (!bars.querySelector("#paused")) say("warn", t.pausedTitle, t.pausedText, { id: "paused", action: [t.resume, () => void setPaused(false)] });
 }
 
 // ---------- actions ----------
 
 async function load() {
-  [rules, folders, journal] = await Promise.all([api.listRules(), api.listFolders(), api.activity()]);
+  try {
+    [rules, folders, journal] = await Promise.all([api.listRules(), api.listFolders(), api.activity()]);
+  } catch (error) {
+    fail(t.loadFailed)(error);
+  }
   render();
 }
 
-async function saveRules() {
-  await api.saveRules(rules);
-  render();
-}
-
-async function saveFolders() {
-  await api.saveFolders(folders);
-  render();
-}
+const saveRules = () => api.saveRules(rules).then(render, (e) => { render(); fail(t.saveFailed)(e); });
+const saveFolders = () => api.saveFolders(folders).then(render, (e) => { render(); fail(t.saveFailed)(e); });
 
 function openEditor(r: Rule) {
   draft = structuredClone(r);
   const w = r.when;
   extRow = w.ext.length > 0 || (w.name_glob ?? w.older_than_days ?? w.min_size ?? w.max_size) === null;
-  view = "editor";
+  setPage("editor");
+  content.querySelector<HTMLInputElement>('[data-field="name"]')?.focus();
+}
+
+async function setPaused(on: boolean) {
+  await api.setPaused(on).catch(fail(t.saveFailed));
+  settings.paused = on;
   render();
-  app.querySelector<HTMLInputElement>('[data-field="name"]')?.focus();
 }
 
 const actions: Record<string, (el: HTMLElement) => unknown> = {
-  go: (el) => { view = el.dataset.v as View; render(); if (view === "activity") refreshActivity(); },
+  go: (el) => setPage(el.dataset.v as Page),
+  "nav-menu": (el) => el.setAttribute("aria-expanded", String(nav.classList.toggle("open"))),
   "folder-add": async () => {
     const path = await api.pickFolder();
     if (path && !folders.some((f) => f.path === path)) { folders.push({ path, paused: false }); await saveFolders(); }
   },
   "folder-pause": (el) => { const f = folders[+el.dataset.i!]; f.paused = !f.paused; return saveFolders(); },
-  "folder-remove": (el) => { folders.splice(+el.dataset.i!, 1); return saveFolders(); },
-  "hint-off": () => { hint = false; try { localStorage.setItem("hint", "off"); } catch {} render(); },
+  "folder-remove": (el) => {
+    const i = +el.dataset.i!;
+    const [gone] = folders.splice(i, 1);
+    say("info", t.stoppedWatching(tail(gone.path, 1)), "", { action: [t.undo, () => { folders.splice(i, 0, gone); void saveFolders(); }] });
+    return saveFolders();
+  },
   "rule-toggle": (el) => { const r = rules[+el.dataset.i!]; r.enabled = !r.enabled; return saveRules(); },
   "rule-edit": (el) => openEditor(rules[+el.dataset.i!]),
-  "rule-delete": (el) => { rules.splice(+el.dataset.i!, 1); return saveRules(); },
-  blank: () => openEditor(blank()),
-  starter: (el) => openEditor(starters[+(el.dataset.i ?? el.dataset.k)!].rule()),
+  "rule-delete": (el) => {
+    const i = +el.dataset.i!;
+    const [gone] = rules.splice(i, 1);
+    say("info", t.deleted(gone.name || t.untitled), "", { action: [t.undo, () => { rules.splice(i, 0, gone); void saveRules(); }] });
+    return saveRules();
+  },
+  "new-rule": (el) => menu(el, [
+    { label: t.blankRule, run: () => openEditor(blank()) },
+    ...starters.map((s) => ({ label: t.starters[s.key], run: () => openEditor(s.rule(t.starters[s.key])) })),
+  ], t.newRule),
   "folder-all": () => { draft!.folders = []; render(); },
-  "folder-chip": (el) => {
+  "folder-check": (el) => {
     const path = el.dataset.k!;
     draft!.folders = draft!.folders.includes(path) ? draft!.folders.filter((p) => p !== path) : [...draft!.folders, path];
     render();
   },
-  "cond-add": (el) => {
-    const k = el.dataset.k as keyof When;
-    if (k === "ext") extRow = true; else (draft!.when[k] as number | string | null) = k === "name_glob" ? "" : 0;
-    render();
-    app.querySelector<HTMLInputElement>(`[data-field="${k}"]`)?.focus();
-  },
+  "add-cond": (el) => menu(el, (Object.keys(t.condMenu) as CondKey[])
+    .filter((k) => (k === "ext" ? !extRow : draft!.when[k] === null))
+    .map((k) => ({ label: t.condMenu[k], run: () => addCond(k) })), t.addCondition),
   "cond-remove": (el) => {
-    const k = el.dataset.k as keyof When;
+    const k = el.dataset.k as CondKey;
     if (k === "ext") { extRow = false; draft!.when.ext = []; } else (draft!.when[k] as null) = null;
     render();
-  },
-  then: (el) => {
-    const old = Object.values(draft!.then)[0] as string;
-    draft!.then = el.dataset.k === "move_to" ? { move_to: old } : { rename: old };
-    render();
+    content.querySelector<HTMLElement>('[data-act="add-cond"]')?.focus();
   },
   token: (el) => {
-    const input = app.querySelector<HTMLInputElement>('[data-field="template"]')!;
+    const input = content.querySelector<HTMLInputElement>('[data-field="template"]')!;
     const at = input.selectionStart ?? input.value.length;
-    input.setRangeText(`{${el.dataset.k}}`, at, input.selectionEnd ?? at, "end");
+    const text = `{${el.dataset.k}}`;
+    input.setRangeText(text, at, input.selectionEnd ?? at, "end");
     setTemplate(input.value);
     render();
-    const again = app.querySelector<HTMLInputElement>('[data-field="template"]')!;
+    const again = content.querySelector<HTMLInputElement>('[data-field="template"]')!;
     again.focus();
-    again.setSelectionRange(at + el.dataset.k!.length + 2, at + el.dataset.k!.length + 2);
+    again.setSelectionRange(at + text.length, at + text.length);
   },
-  cancel: () => { draft = null; view = "rules"; render(); },
+  cancel: () => { draft = null; setPage("rules"); },
   save: () => {
     const i = rules.findIndex((r) => r.id === draft!.id);
     // New rules start off: preview first, then switch on (plan: SAFETY).
     if (i >= 0) rules[i] = draft!; else rules.push(draft!);
     draft = null;
-    view = "rules";
+    setPage("rules");
     return saveRules();
   },
-  try: () => { previewOf = draft!.id; view = "preview"; return runPreview(); },
-  "preview-of": (el) => { previewOf = el.dataset.k!; planned = null; render(); },
+  try: () => { previewOf = draft!.id; planned = null; setPage("preview"); return runPreview(); },
   "run-preview": () => runPreview(),
   // Partly done is still done: show Activity, then say which files were left.
   apply: async () => {
     const error = await api.apply(planned!).then(() => null, (e) => e);
     planned = null;
-    view = "activity";
+    setPage("activity");
     await refreshActivity();
-    if (error) toast(String(error));
+    if (error) say("warn", t.applyFailed, String(error));
   },
-  undo: (el) => api.undo(el.dataset.k!).finally(refreshActivity),
+  undo: (el) => api.undo(el.dataset.k!).catch((e) => say("warn", t.undoFailed, String(e))).finally(refreshActivity),
+  autostart: async () => {
+    await api.setAutostart(!settings.autostart).catch(fail(t.saveFailed));
+    await refreshSettings();
+  },
+  "pause-all": () => setPaused(!settings.paused),
+  open: (el) => api.openExternal(el.dataset.k!).catch(fail(t.openFailed)),
 };
+
+function addCond(k: CondKey) {
+  if (k === "ext") extRow = true; else (draft!.when[k] as number | string | null) = k === "name_glob" ? "" : 0;
+  render();
+  content.querySelector<HTMLInputElement>(`[data-field="${k}"]`)?.focus();
+}
 
 async function runPreview() {
   const pool = previewOf === "all" ? rules.filter((r) => r.enabled) : [...rules, ...(draft ? [draft] : [])].filter((r) => r.id === previewOf);
   const seen = new Set<string>();
-  planned = [];
-  // ponytail: first match wins across rules by dropping files an earlier rule already planned.
-  for (const rule of pool) {
-    for (const p of await api.preview(rule)) if (!seen.has(p.from)) { seen.add(p.from); planned.push(p); }
+  const next: Planned[] = [];
+  try {
+    // ponytail: first match wins across rules by dropping files an earlier rule already planned.
+    for (const rule of pool) {
+      for (const p of await api.preview(rule)) if (!seen.has(p.from)) { seen.add(p.from); next.push(p); }
+    }
+    planned = next;
+  } catch (error) {
+    fail(t.previewFailed)(error);
   }
   render();
 }
 
 async function refreshActivity() {
-  journal = await api.activity();
+  journal = await api.activity().catch((e) => { fail(t.loadFailed)(e); return journal; });
+  if (page === "activity") render();
+}
+
+async function refreshSettings() {
+  const next = await api.getSettings().catch(() => null);
+  if (next) settings = { ...next, theme: settings.theme };
   render();
 }
 
@@ -399,18 +518,34 @@ function setTemplate(value: string) {
   draft!.then = "move_to" in draft!.then ? { move_to: value } : { rename: value };
 }
 
-app.addEventListener("click", async (event) => {
+async function changeLang(next: Lang) {
+  setLang(next);
+  settings.lang = next;
+  store("lang", next);
+  build();
+  await api.setLanguage(next).catch(fail(t.saveFailed));
+  content.querySelector<HTMLElement>(`[aria-label="${CSS.escape(t.language)}"]`)?.focus();
+}
+
+function applyTheme() {
+  if (settings.theme === "system") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = settings.theme;
+  void getCurrentWindow().setTheme(settings.theme === "system" ? null : settings.theme).catch(() => {});
+}
+
+// ---------- events ----------
+
+document.addEventListener("click", async (event) => {
   const el = (event.target as HTMLElement).closest<HTMLElement>("[data-act]");
-  if (!el) return;
-  el.closest<HTMLElement>("[popover]")?.hidePopover();
+  if (!el || !document.body.contains(el) || el.closest(".infobar")) return;
   try {
     await actions[el.dataset.act!]?.(el);
   } catch (error) {
-    toast(String(error));
+    fail(t.actionFailed)(error);
   }
 });
 
-app.addEventListener("input", (event) => {
+document.addEventListener("input", (event) => {
   const input = event.target as HTMLInputElement;
   const key = input.dataset.field;
   if (!draft || !key) return;
@@ -425,80 +560,73 @@ app.addEventListener("input", (event) => {
   // Live bits only, so the caret stays put.
   const sample = sampleFile(draft);
   const template = Object.values(draft.then)[0] as string;
-  app.querySelector(".example .file")!.textContent = sample;
-  app.querySelector(".example .dest")!.textContent = template ? short(target(draft, "~/Downloads", sample)) : "…";
-  app.querySelector<HTMLButtonElement>('[data-act="save"]')!.disabled = !template.trim();
+  content.querySelector(".example .file")!.textContent = sample;
+  content.querySelector(".example .dest")!.textContent = template ? short(target(draft, "~/Downloads", sample)) : "…";
+  content.querySelector<HTMLButtonElement>('[data-act="save"]')!.disabled = !template.trim();
 });
 
 // Drag to reorder rules; arrow keys on the grip do the same from the keyboard.
 let dragging = -1;
-app.addEventListener("dragstart", (e) => {
+document.addEventListener("dragstart", (e) => {
   const li = (e.target as HTMLElement).closest<HTMLElement>(".rule");
   if (!li) return;
   dragging = +li.dataset.i!;
   li.classList.add("dragging");
   e.dataTransfer!.effectAllowed = "move";
 });
-app.addEventListener("dragover", (e) => {
+document.addEventListener("dragover", (e) => {
   if (dragging < 0 || !(e.target as HTMLElement).closest(".rule")) return;
   e.preventDefault();
 });
-app.addEventListener("drop", (e) => {
+document.addEventListener("drop", (e) => {
   const li = (e.target as HTMLElement).closest<HTMLElement>(".rule");
   if (!li || dragging < 0) return;
   e.preventDefault();
   moveRule(dragging, +li.dataset.i!);
 });
-app.addEventListener("dragend", () => { dragging = -1; app.querySelector(".dragging")?.classList.remove("dragging"); });
-app.addEventListener("keydown", (e) => {
+document.addEventListener("dragend", () => { dragging = -1; content.querySelector(".dragging")?.classList.remove("dragging"); });
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && nav.classList.contains("open")) { nav.classList.remove("open"); return; }
   const grip = (e.target as HTMLElement).closest<HTMLElement>(".grip");
   if (!grip || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
   e.preventDefault();
   const from = +grip.dataset.i!;
   const to = Math.min(rules.length - 1, Math.max(0, from + (e.key === "ArrowUp" ? -1 : 1)));
-  if (moveRule(from, to)) app.querySelector<HTMLElement>(`.grip[data-i="${to}"]`)?.focus();
+  if (moveRule(from, to)) content.querySelector<HTMLElement>(`.grip[data-i="${to}"]`)?.focus();
 });
 
 function moveRule(from: number, to: number) {
   if (from === to) return false;
   rules.splice(to, 0, ...rules.splice(from, 1));
   render();
-  api.saveRules(rules).catch((error) => toast(String(error)));
+  api.saveRules(rules).catch(fail(t.saveFailed));
   return true;
 }
 
-// Overlay scrollbar: the native one is hidden (scrollbar-width: none); this thumb mirrors it and can be dragged.
-function scrollbar() {
-  const scroll = app.querySelector<HTMLElement>(".scroll")!;
-  const thumb = app.querySelector<HTMLElement>(".thumb")!;
-  const update = () => {
-    const { scrollHeight: total, clientHeight: seen, scrollTop: top } = scroll;
-    thumb.hidden = total <= seen + 1;
-    const size = Math.max(32, (seen * seen) / total);
-    thumb.style.height = `${size}px`;
-    thumb.style.translate = `0 ${(top / (total - seen || 1)) * (seen - size)}px`;
-  };
-  scroll.addEventListener("scroll", update, { passive: true });
-  new ResizeObserver(update).observe(scroll.firstElementChild!);
-  thumb.onpointerdown = (e) => {
-    const startY = e.clientY;
-    const startTop = scroll.scrollTop;
-    thumb.setPointerCapture(e.pointerId);
-    thumb.onpointermove = (m) => {
-      const ratio = (scroll.scrollHeight - scroll.clientHeight) / (scroll.clientHeight - thumb.offsetHeight || 1);
-      scroll.scrollTop = startTop + (m.clientY - startY) * ratio;
-    };
-    thumb.onpointerup = () => { thumb.onpointermove = null; };
-  };
-  update();
+// ---------- boot ----------
+
+async function boot() {
+  setLang((stored("lang") as Lang | null) ?? systemLang());
+  page = (stored("page") as Page | null) ?? "rules";
+  if (!(page in pages) || page === "editor") page = "rules";
+  tooltips();
+  applyTheme();
+  void (navigator as any).userAgentData?.getHighEntropyValues(["platformVersion"]).then((ua: { platformVersion: string }) => {
+    document.documentElement.classList.toggle("mica", parseInt(ua.platformVersion) >= 13); // Windows 11
+  });
+  build();
+  // The saved choice lives in rules.json so the tray reads it too; localStorage only avoids a flash.
+  const saved = await api.getSettings().catch(() => null);
+  if (saved) {
+    const theme = saved.theme;
+    settings = saved;
+    if (theme !== stored("theme")) { store("theme", theme); applyTheme(); }
+    if (saved.lang !== lang) { setLang(saved.lang); store("lang", saved.lang); build(); }
+  }
+  void getVersion().then((v) => { version = v; if (page === "about") render(); }).catch(() => {});
+  void api.onActivity(() => void refreshActivity());
+  void api.onSettings(() => void refreshSettings());
+  await load();
 }
 
-function toast(text: string) {
-  const el = Object.assign(document.createElement("div"), { className: "toast", role: "alert", textContent: text });
-  document.body.append(el);
-  setTimeout(() => el.remove(), 4000);
-}
-
-window.addEventListener("resize", () => app.querySelector(".scroll")?.dispatchEvent(new Event("scroll")));
-void api.onActivity(() => void refreshActivity());
-void load();
+void boot();

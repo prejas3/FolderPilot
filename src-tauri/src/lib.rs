@@ -1,26 +1,31 @@
 mod engine;
+pub mod i18n;
 pub mod model;
 mod watch;
 
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
-use model::{JournalEntry, Planned, Rule, WatchedFolder, ACTIVITY_EVENT};
+use i18n::tr;
+use model::{JournalEntry, Planned, Rule, Settings, WatchedFolder, ACTIVITY_EVENT, SETTINGS_EVENT};
 use serde::{Deserialize, Serialize};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem},
     tray::TrayIconBuilder,
-    Emitter, Manager, State, WindowEvent,
+    Emitter, Manager, State, WindowEvent, Wry,
 };
 use watch::{autostart, Organizer};
 
-// CCS/1 M:commands | IO:UI <-> Organizer | STATE:%APPDATA%/FolderPilot/rules.json {rules, folders} + journal.jsonl
+// CCS/1 M:commands | IO:UI <-> Organizer | STATE:%APPDATA%/FolderPilot/rules.json {rules, folders, lang, theme} + journal.jsonl
+// LANG:i18n::set at start (saved lang ?? Windows UI language); set_language relabels the tray
 struct App {
     org: Arc<Organizer>,
     config: PathBuf,
+    /// Saved Settings choices: (lang, theme); None = follow Windows.
+    prefs: Mutex<(Option<String>, Option<String>)>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -28,6 +33,25 @@ struct App {
 struct Config {
     rules: Vec<Rule>,
     folders: Vec<WatchedFolder>,
+    lang: Option<String>,
+    theme: Option<String>,
+}
+
+/// Tray items, kept to relabel them on a language change and to follow Settings switches.
+struct Tray {
+    open: MenuItem<Wry>,
+    pause: CheckMenuItem<Wry>,
+    start: CheckMenuItem<Wry>,
+    quit: MenuItem<Wry>,
+}
+
+impl Tray {
+    fn label(&self) {
+        let _ = self.open.set_text(tr("Open FolderPilot", "Otwórz FolderPilot"));
+        let _ = self.pause.set_text(tr("Pause all", "Wstrzymaj wszystko"));
+        let _ = self.start.set_text(tr("Start with Windows", "Uruchamiaj z Windows"));
+        let _ = self.quit.set_text(tr("Quit", "Zamknij"));
+    }
 }
 
 /// Missing = first start. Unreadable = kept aside as rules.json.bad (never lost), start empty.
@@ -42,7 +66,9 @@ fn load_config(path: &Path) -> Config {
 
 /// Write-then-rename, so a crash mid-write leaves the old file whole.
 fn save_config(app: &App) -> Result<(), String> {
-    let config = Config { rules: app.org.rules.lock().map_err(|e| e.to_string())?.clone(), folders: app.org.folders() };
+    let (lang, theme) = app.prefs.lock().map_err(|e| e.to_string())?.clone();
+    let rules = app.org.rules.lock().map_err(|e| e.to_string())?.clone();
+    let config = Config { rules, folders: app.org.folders(), lang, theme };
     let write = || -> io::Result<()> {
         let tmp = app.config.with_extension("json.tmp");
         fs::write(&tmp, serde_json::to_vec_pretty(&config)?)?;
@@ -84,7 +110,12 @@ fn preview(rule: Rule, app: State<'_, App>) -> Result<Vec<Planned>, String> {
 fn apply(planned: Vec<Planned>, app: State<'_, App>) -> Result<Vec<JournalEntry>, String> {
     let applied = app.org.apply(&planned).map_err(|error| error.to_string())?;
     match left(&applied.failed) {
-        Some(why) => Err(format!("Moved {}, left {}", applied.done.len(), why)),
+        Some(why) => Err(tr!(
+            "Moved {}. Left where they were: {}",
+            "Przeniesiono {}. Bez zmian zostały: {}",
+            applied.done.len(),
+            why
+        )),
         None => Ok(applied.done),
     }
 }
@@ -98,7 +129,7 @@ fn activity(app: State<'_, App>) -> Result<Vec<JournalEntry>, String> {
 fn undo(run: String, app: State<'_, App>) -> Result<(), String> {
     let undone = app.org.undo(&run).map_err(|error| error.to_string())?;
     match left(&undone.skipped) {
-        Some(why) => Err(format!("Moved back {}, left {}", undone.restored.len(), why)),
+        Some(why) => Err(tr!("Moved back {}. Left: {}", "Przywrócono {}. Pozostały: {}", undone.restored.len(), why)),
         None => Ok(()),
     }
 }
@@ -112,6 +143,58 @@ fn left(files: &[(PathBuf, String)]) -> Option<String> {
             .collect();
         format!("{}: {}", files.len(), list.join(", "))
     })
+}
+
+#[tauri::command]
+fn get_settings(app: State<'_, App>) -> Result<Settings, String> {
+    let theme = app.prefs.lock().map_err(|e| e.to_string())?.1.clone();
+    Ok(Settings {
+        lang: i18n::lang().into(),
+        theme: theme.unwrap_or_else(|| "system".into()),
+        autostart: autostart::enabled(),
+        paused: app.org.is_paused(),
+    })
+}
+
+/// The window, tray and backend errors all follow it.
+#[tauri::command]
+fn set_language(lang: String, app: State<'_, App>, tray: State<'_, Tray>) -> Result<(), String> {
+    let lang = if lang == "pl" { "pl" } else { "en" };
+    i18n::set(lang);
+    tray.label();
+    app.prefs.lock().map_err(|e| e.to_string())?.0 = Some(lang.into());
+    save_config(&app)
+}
+
+#[tauri::command]
+fn set_theme(theme: String, app: State<'_, App>) -> Result<(), String> {
+    let theme = matches!(theme.as_str(), "light" | "dark").then_some(theme);
+    app.prefs.lock().map_err(|e| e.to_string())?.1 = theme;
+    save_config(&app)
+}
+
+#[tauri::command]
+fn set_autostart(on: bool, tray: State<'_, Tray>) -> Result<(), String> {
+    let result = autostart::set(on);
+    let _ = tray.start.set_checked(autostart::enabled());
+    result
+}
+
+#[tauri::command]
+fn set_paused(on: bool, app: State<'_, App>, tray: State<'_, Tray>) {
+    app.org.set_paused(on);
+    let _ = tray.pause.set_checked(on);
+}
+
+/// "data" opens %APPDATA%/FolderPilot; an https link opens in the default browser.
+#[tauri::command]
+fn open_external(target: String, app: State<'_, App>) -> Result<(), String> {
+    let target = match target.as_str() {
+        "data" => app.config.parent().unwrap_or(&app.config).display().to_string(),
+        url if url.starts_with("https://") && !url.contains('"') => url.to_string(),
+        _ => return Err(tr("That link can't be opened.", "Tego linku nie można otworzyć.").into()),
+    };
+    std::process::Command::new("explorer.exe").arg(target).spawn().map(|_| ()).map_err(|error| error.to_string())
 }
 
 fn show_main(app: &tauri::AppHandle) {
@@ -129,7 +212,7 @@ pub fn run() {
         .setup(|app| {
             let root = std::env::var_os("APPDATA")
                 .map(PathBuf::from)
-                .ok_or("APPDATA is unavailable")?
+                .ok_or("APPDATA is unavailable")? // i18n-ok: startup failure, before any window
                 .join("FolderPilot");
             fs::create_dir_all(&root)?;
             let handle = app.handle().clone();
@@ -138,19 +221,24 @@ pub fn run() {
             })?);
             let config = root.join("rules.json");
             let saved = load_config(&config);
+            i18n::set(saved.lang.as_deref().unwrap_or_else(|| i18n::system_lang()));
             *org.rules.lock().map_err(|e| e.to_string())? = saved.rules;
             org.set_folders(saved.folders);
-            app.manage(App { org: org.clone(), config });
+            app.manage(App { org: org.clone(), config, prefs: Mutex::new((saved.lang, saved.theme)) });
             watch::spawn(org)?;
             if !std::env::args().any(|arg| arg == autostart::ARG) {
                 show_main(app.handle());
             }
 
-            let open = MenuItem::with_id(app, "open", "Open FolderPilot", true, None::<&str>)?;
-            let pause = CheckMenuItem::with_id(app, "pause", "Pause all", true, false, None::<&str>)?;
-            let start = CheckMenuItem::with_id(app, "autostart", "Start with Windows", true, autostart::enabled(), None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &pause, &start, &quit])?;
+            let tray = Tray {
+                open: MenuItem::with_id(app, "open", "", true, None::<&str>)?,
+                pause: CheckMenuItem::with_id(app, "pause", "", true, false, None::<&str>)?,
+                start: CheckMenuItem::with_id(app, "autostart", "", true, autostart::enabled(), None::<&str>)?,
+                quit: MenuItem::with_id(app, "quit", "", true, None::<&str>)?,
+            };
+            tray.label();
+            let menu = Menu::with_items(app, &[&tray.open, &tray.pause, &tray.start, &tray.quit])?;
+            app.manage(tray);
             let icon = app
                 .default_window_icon()
                 .cloned()
@@ -159,22 +247,26 @@ pub fn run() {
                 .icon(icon)
                 .tooltip("FolderPilot")
                 .menu(&menu)
-                .on_menu_event(move |app, event| match event.id.as_ref() {
-                    "open" => show_main(app),
-                    "pause" => {
-                        let org = &app.state::<App>().org;
-                        let paused = !org.is_paused();
-                        org.set_paused(paused);
-                        let _ = pause.set_checked(paused);
-                    }
-                    "autostart" => {
-                        if let Err(error) = autostart::set(!autostart::enabled()) {
-                            eprintln!("folderpilot: autostart: {error}");
+                .on_menu_event(move |app, event| {
+                    let tray = app.state::<Tray>();
+                    match event.id.as_ref() {
+                        "open" => show_main(app),
+                        "pause" => {
+                            let org = &app.state::<App>().org;
+                            let paused = !org.is_paused();
+                            org.set_paused(paused);
+                            let _ = tray.pause.set_checked(paused);
                         }
-                        let _ = start.set_checked(autostart::enabled());
+                        "autostart" => {
+                            if let Err(error) = autostart::set(!autostart::enabled()) {
+                                eprintln!("folderpilot: autostart: {error}");
+                            }
+                            let _ = tray.start.set_checked(autostart::enabled());
+                        }
+                        "quit" => app.exit(0),
+                        _ => return,
                     }
-                    "quit" => app.exit(0),
-                    _ => {}
+                    let _ = app.emit(SETTINGS_EVENT, ());
                 })
                 .build(app)?;
             Ok(())
@@ -195,7 +287,13 @@ pub fn run() {
             preview,
             apply,
             activity,
-            undo
+            undo,
+            get_settings,
+            set_language,
+            set_theme,
+            set_autostart,
+            set_paused,
+            open_external
         ])
         .run(tauri::generate_context!())
         .expect("error while running FolderPilot");
@@ -208,15 +306,20 @@ mod tests {
     use model::{Then, When};
 
     #[test]
-    fn rules_and_folders_survive_restart() {
+    fn rules_folders_and_prefs_survive_restart() {
         let t = Temp::new();
-        let app = App { org: Arc::new(Organizer::new(t.0.join("journal.jsonl"), |_| {}).unwrap()), config: t.0.join("rules.json") };
+        let app = App {
+            org: Arc::new(Organizer::new(t.0.join("journal.jsonl"), |_| {}).unwrap()),
+            config: t.0.join("rules.json"),
+            prefs: Mutex::new((Some("pl".into()), Some("dark".into()))),
+        };
         *app.org.rules.lock().unwrap() = vec![rule("pdf", When { ext: vec!["pdf".into()], ..Default::default() }, Then::MoveTo("~/Documents/PDF".into()))];
         app.org.set_folders(vec![WatchedFolder { path: t.0.join("in"), paused: true }]);
         save_config(&app).unwrap();
         let loaded = load_config(&app.config);
         assert_eq!(loaded.rules, *app.org.rules.lock().unwrap());
         assert_eq!(loaded.folders, app.org.folders());
+        assert_eq!((loaded.lang.as_deref(), loaded.theme.as_deref()), (Some("pl"), Some("dark")));
         assert!(!t.0.join("rules.json.tmp").exists());
     }
 
@@ -227,5 +330,13 @@ mod tests {
         assert!(load_config(&config).rules.is_empty());
         assert_eq!(fs::read(t.0.join("rules.json.bad")).unwrap(), b"{ not json");
         assert!(load_config(&t.0.join("missing.json")).folders.is_empty());
+    }
+
+    #[test]
+    fn config_from_0_1_loads_without_prefs() {
+        let t = Temp::new();
+        let config = t.file("rules.json", br#"{"rules":[],"folders":[]}"#);
+        let loaded = load_config(&config);
+        assert_eq!((loaded.lang, loaded.theme), (None, None));
     }
 }

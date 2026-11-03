@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#14161a"/>
-  <path d="M96 160h120l32 40h168v192H96Z" fill="#f5b942"/>
-  <path d="M200 296h96l-32-32m32 32-32 32" stroke="#14161a" stroke-width="28" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <!-- FolderPilot: a folder with a heading arrow. SJ Utility UI 10.2: 48 grid, 4 margin, accent ramp oklch(52% .14 245) / oklch(76% .12 240), no tile. -->
+  <path d="M4 11a4 4 0 0 1 4-4h10.3a3 3 0 0 1 2.1.9L24 11.5h16a4 4 0 0 1 4 4V37a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4Z" fill="#006eb3"/>
+  <path d="M13 27h20m-7-7 7 7-7 7" fill="none" stroke="#62bbf5" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

@@ -111,27 +111,28 @@ try {
   // 4 starters in order, destinations pointed into the test tree
   for (let i = 0; i < 4; i++) {
     await js(click('[data-act="go"][data-v="rules"]'));
-    await js(click(`[data-act="starter"][data-k="${i}"]`) );
+    await js(click('[data-act="new-rule"]'));
+    await until(() => js(`return document.querySelectorAll(".menu .menu-item").length === 5`));
+    await js(`document.querySelectorAll(".menu .menu-item")[${i + 1}].click()`); // 0 = blank rule, then the 4 starters
     await until(() => js(`return !!document.querySelector('[data-field="template"]')`));
     if (dest[i]) await js(`const t = document.querySelector('[data-field="template"]'); t.value = ${JSON.stringify(dest[i])}; t.dispatchEvent(new Event("input", { bubbles: true }));`);
     await js(click('[data-act="save"]'));
     await until(() => js(`return document.querySelectorAll(".rule").length === ${i + 1}`));
   }
-  const saved = config();
+  const saved = await until(() => { const c = config(); return c.rules.length === 4 && c; }, 5000) || config(); // the list renders before the save lands
   check("4 starters saved, off by default", saved.rules.length === 4 && saved.rules.every((r) => !r.enabled), saved.rules.map((r) => r.name).join(" | "));
   for (let i = 0; i < 4; i++) {
     await js(click(`[data-act="rule-toggle"][data-i="${i}"]`));
     await until(() => js(`return document.querySelector('[data-act="rule-toggle"][data-i="${i}"]').getAttribute("aria-checked") === "true"`));
   }
   check("all 4 switched on and saved", await until(() => config().rules.every((r) => r.enabled), 5000));
-  await js(click('[data-act="hint-off"]')).catch(() => {});
   await shot("01-rules.png");
 
   // preview
   await js(click('[data-act="go"][data-v="preview"]'));
   await js(click('[data-act="run-preview"]'));
   await until(() => js(`return !!document.querySelector('[data-act="apply"]')`));
-  const plan = await js(`return [...document.querySelectorAll(".moves .move")].map(m => [m.querySelector(".file").title, m.querySelector(".dest").title])`);
+  const plan = await js(`return [...document.querySelectorAll(".moves .move")].map(m => [m.querySelector(".file").dataset.tip, m.querySelector(".dest").dataset.tip])`);
   const planMap = Object.fromEntries(plan.map(([f, t]) => [path.basename(f), path.relative(ROOT, t).replace(/\\/g, "/")]));
   const planOk = Object.keys(expected).length === plan.length && Object.entries(expected).every(([f, t]) => planMap[f] === t);
   check("preview lists exactly the expected moves", planOk, planOk ? `${plan.length} moves` : JSON.stringify(planMap));
@@ -152,7 +153,7 @@ try {
 
   // undo
   await js(click('[data-act="undo"]'));
-  await until(() => js(`return [...document.querySelectorAll(".run .sub")].some(s => s.textContent === "Undone")`));
+  await until(() => js(`return !!document.querySelector(".run[data-undone]")`));
   const back = Object.entries(expected).filter(([f, t]) => !exists(`Inbox/${f}`) || exists(t));
   check("undo brings every file back", !back.length, back.map(([f]) => f).join(", "));
   await sleep(5000);
@@ -170,7 +171,7 @@ try {
   await stop();
   ({ js, shot, ws } = await launch());
   await js(click('[data-act="go"][data-v="rules"]'));
-  const after = await until(() => js(`return [...document.querySelectorAll('.rule')].map(r => r.querySelector('.name').textContent + (r.querySelector('.switch').getAttribute('aria-checked') === 'true' ? ' on' : ' off'))`), 5000);
+  const after = await until(() => js(`return [...document.querySelectorAll('.rule')].map(r => r.querySelector('.name').textContent + (r.querySelector('.toggle').getAttribute('aria-checked') === 'true' ? ' on' : ' off'))`), 5000);
   check("rules survive restart (UI)", after?.length === 4 && after.every((s) => s.endsWith(" on")), (after ?? []).join(" | "));
   await js(click('[data-act="go"][data-v="folders"]'));
   check("folder survives restart (UI)", await js(`return document.querySelector(".page").textContent.includes(${JSON.stringify(inbox)})`));
@@ -180,6 +181,24 @@ try {
   // Undo's restored files stay protected after a restart too (produced set rebuilt from the journal).
   await sleep(6000);
   check("start rescan leaves undone files alone", Object.keys(expected).every((f) => exists(`Inbox/${f}`)));
+
+  // language: the Settings switch changes the whole window and survives a restart (FO-167)
+  const before = await js(`return document.documentElement.lang`);
+  const other = before === "pl" ? "en" : "pl";
+  const navText = () => js(`return document.querySelector('[data-v="rules"] span').textContent`);
+  const rulesBefore = await navText();
+  await js(click('[data-act="go"][data-v="settings"]'));
+  await js(`document.querySelector(".card .select").click()`); // first select on Settings = language
+  await until(() => js(`return !!document.querySelector('[role="option"]')`));
+  await js(`[...document.querySelectorAll('[role="option"]')].find(o => o.textContent === ${JSON.stringify(other === "pl" ? "Polski" : "English")}).click()`);
+  const switched = await until(async () => (await js(`return document.documentElement.lang`)) === other && (await navText()) !== rulesBefore);
+  check("language switch changes the window", !!switched, `${before} -> ${other}: ${rulesBefore} -> ${await navText()}`);
+  check("language saved in rules.json", await until(() => config().lang === other, 5000));
+  await shot("06-settings-other-language.png");
+  ws.close();
+  await stop();
+  ({ js, shot, ws } = await launch());
+  check("language survives restart", await until(async () => (await js(`return document.documentElement.lang`)) === other && (await navText()) !== rulesBefore, 5000));
   ws.close();
   await stop();
 } catch (error) {

@@ -15,6 +15,8 @@ export type Then = { move_to: string } | { rename: string };
 export type Rule = { id: string; name: string; enabled: boolean; folders: string[]; when: When; then: Then };
 export type WatchedFolder = { path: string; paused: boolean };
 export type Planned = { from: string; to: string; rule: string };
+export type Theme = "system" | "light" | "dark";
+export type Settings = { lang: "en" | "pl"; theme: Theme; autostart: boolean; paused: boolean };
 export type JournalEntry = { run: string; from: string; to: string; at: number; rule: string; size?: number; modified?: number };
 
 export const api = {
@@ -28,6 +30,15 @@ export const api = {
   undo: (run: string) => invoke<void>("undo", { run }),
   pickFolder: async () => (await open({ directory: true })) as string | null,
   onActivity: (fn: () => void) => listen("activity", fn),
+  getSettings: () => invoke<Settings>("get_settings"),
+  setLanguage: (lang: string) => invoke<void>("set_language", { lang }),
+  setTheme: (theme: Theme) => invoke<void>("set_theme", { theme }),
+  setAutostart: (on: boolean) => invoke<void>("set_autostart", { on }),
+  setPaused: (on: boolean) => invoke<void>("set_paused", { on }),
+  /** "data" = %APPDATA%/FolderPilot, else an https link. */
+  openExternal: (target: string) => invoke<void>("open_external", { target }),
+  /** The tray changed pause or autostart. */
+  onSettings: (fn: () => void) => listen("settings", fn),
 };
 
 /** {name}=stem, {ext} without dot; date tokens from `date` (engine: EXIF for images, else modified). */

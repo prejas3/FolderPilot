@@ -268,7 +268,7 @@ pub mod autostart {
         };
         match ok {
             Ok(true) => Ok(()),
-            Ok(false) => Err("reg.exe failed".into()),
+            Ok(false) => Err(crate::i18n::tr("Windows did not save the setting.", "Windows nie zapisał ustawienia.").into()),
             Err(error) => Err(error.to_string()),
         }
     }

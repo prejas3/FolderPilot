@@ -4,6 +4,18 @@ use std::path::PathBuf;
 
 /// Emitted with a `Vec<JournalEntry>` after every applied run (watcher or manual).
 pub const ACTIVITY_EVENT: &str = "activity";
+/// Emitted (no payload) when the tray changes something the Settings page shows; the UI reads `get_settings` again.
+pub const SETTINGS_EVENT: &str = "settings";
+
+/// Settings page state. lang "en"|"pl" (saved choice, else Windows UI language); theme "system"|"light"|"dark".
+/// lang and theme persist in rules.json; autostart is the HKCU Run value; paused is the tray's "Pause all" (not saved).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Settings {
+    pub lang: String,
+    pub theme: String,
+    pub autostart: bool,
+    pub paused: bool,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Rule {

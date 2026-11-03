@@ -3,7 +3,7 @@
 //! STATE:journal.jsonl, one JournalEntry per line, appended after every single move (a crash keeps what was done undoable)
 //! !RULE:no unjournalled move: journal opened before the first move; a failed write moves that file back and aborts the run
 use super::{key, numbered};
-use crate::model::{JournalEntry, Planned};
+use crate::{i18n::tr, model::{JournalEntry, Planned}};
 use std::{
     collections::HashSet,
     fs,
@@ -54,10 +54,10 @@ fn undo_to(run: &str, entries: &[JournalEntry], log: &mut impl Write) -> io::Res
     let mut undone = Undone { run: format!("undo-{run}"), ..Default::default() };
     for e in entries.iter().filter(|e| e.run == run).rev() {
         let skip = match fs::metadata(&e.to) {
-            Err(_) => Some("no longer there".to_string()),
+            Err(_) => Some(tr("no longer there", "już go tam nie ma").to_string()),
             // modified 0 = entry from before it was journalled: size only.
             Ok(meta) if meta.len() != e.size || (e.modified != 0 && modified(&meta) != e.modified) => {
-                Some("changed since it was moved".to_string())
+                Some(tr("changed since it was moved", "zmienił się od przeniesienia").to_string())
             }
             Ok(_) => None,
         };
@@ -86,10 +86,15 @@ fn journalled_move(from: &Path, to: &Path, run: &str, rule: &str, log: &mut impl
         .and_then(|()| log.flush());
     if let Err(error) = written {
         let back = match move_file(&entry.to, from) {
-            Ok((back, ..)) => format!("moved back to {}", back.display()),
-            Err(stuck) => format!("left at {} ({stuck})", entry.to.display()),
+            Ok((back, ..)) => crate::tr!("moved back to {}", "wrócił do {}", back.display()),
+            Err(stuck) => crate::tr!("left at {} ({})", "został w {} ({})", entry.to.display(), stuck),
         };
-        return Err(io::Error::other(format!("journal write failed ({error}); file {back}")));
+        return Err(io::Error::other(crate::tr!(
+            "journal write failed ({}); file {}",
+            "nie udało się zapisać dziennika ({}); plik {}",
+            error,
+            back
+        )));
     }
     Ok(Ok(entry))
 }
@@ -126,7 +131,7 @@ fn modified(meta: &fs::Metadata) -> u64 {
 fn move_file(from: &Path, to: &Path) -> io::Result<(PathBuf, u64, u64)> {
     let meta = fs::metadata(from)?;
     if !meta.is_file() {
-        return Err(io::Error::other("not a file"));
+        return Err(io::Error::other(tr("not a file", "to nie jest plik")));
     }
     if let Some(dir) = to.parent() {
         fs::create_dir_all(dir)?;
@@ -199,7 +204,7 @@ fn copy_across(from: &Path, to: &Path, meta: &fs::Metadata) -> io::Result<()> {
         }
         other => {
             let _ = fs::remove_file(to); // our own partial copy, never user data
-            other.and(Err(io::Error::other("copy size mismatch")))
+            other.and(Err(io::Error::other(tr("copy size mismatch", "kopia ma inny rozmiar"))))
         }
     }
 }
