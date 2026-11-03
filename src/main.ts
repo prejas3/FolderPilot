@@ -1,5 +1,4 @@
 import { getVersion } from "@tauri-apps/api/app";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, target, type JournalEntry, type Planned, type Rule, type Settings, type Theme, type WatchedFolder, type When } from "./api";
 import { lang, setLang, systemLang, t, type Lang } from "./i18n";
 import { icon, type IconName } from "./icons";
@@ -529,8 +528,7 @@ async function changeLang(next: Lang) {
 
 function applyTheme() {
   if (settings.theme === "system") delete document.documentElement.dataset.theme;
-  else document.documentElement.dataset.theme = settings.theme;
-  void getCurrentWindow().setTheme(settings.theme === "system" ? null : settings.theme).catch(() => {});
+  else document.documentElement.dataset.theme = settings.theme; // the native frame + Mica follow in the backend (set_theme)
 }
 
 // ---------- events ----------

@@ -1,13 +1,14 @@
 {
   "name": "folderpilot",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "tauri": "tauri",
-    "check:i18n": "node scripts/i18n-check.mjs"
+    "check:i18n": "node scripts/i18n-check.mjs",
+    "notices": "node scripts/third-party-notices.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

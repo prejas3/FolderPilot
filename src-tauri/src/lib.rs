@@ -167,10 +167,24 @@ fn set_language(lang: String, app: State<'_, App>, tray: State<'_, Tray>) -> Res
 }
 
 #[tauri::command]
-fn set_theme(theme: String, app: State<'_, App>) -> Result<(), String> {
+fn set_theme(theme: String, app: State<'_, App>, window: tauri::WebviewWindow) -> Result<(), String> {
     let theme = matches!(theme.as_str(), "light" | "dark").then_some(theme);
+    apply_theme(&window, theme.as_deref());
     app.prefs.lock().map_err(|e| e.to_string())?.1 = theme;
     save_config(&app)
+}
+
+/// Native frame + Mica follow the app theme. Plain Mica follows Windows' theme, not the window's, so a light app on a
+/// dark Windows kept a dark frame and backdrop (FO-168): pick MicaLight/MicaDark explicitly.
+fn apply_theme(window: &tauri::WebviewWindow, theme: Option<&str>) {
+    use tauri::window::{Effect, EffectsBuilder};
+    let (native, mica) = match theme {
+        Some("light") => (Some(tauri::Theme::Light), Effect::MicaLight),
+        Some("dark") => (Some(tauri::Theme::Dark), Effect::MicaDark),
+        _ => (None, Effect::Mica),
+    };
+    let _ = window.set_theme(native);
+    let _ = window.set_effects(EffectsBuilder::new().effect(mica).build());
 }
 
 #[tauri::command]
@@ -224,6 +238,9 @@ pub fn run() {
             i18n::set(saved.lang.as_deref().unwrap_or_else(|| i18n::system_lang()));
             *org.rules.lock().map_err(|e| e.to_string())? = saved.rules;
             org.set_folders(saved.folders);
+            if let Some(window) = app.get_webview_window("main") {
+                apply_theme(&window, saved.theme.as_deref());
+            }
             app.manage(App { org: org.clone(), config, prefs: Mutex::new((saved.lang, saved.theme)) });
             watch::spawn(org)?;
             if !std::env::args().any(|arg| arg == autostart::ARG) {

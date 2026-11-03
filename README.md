@@ -2,11 +2,14 @@
 
 Open-source automatic file organiser for Windows. Pick the folders to watch, write a few plain rules, and FolderPilot moves or renames new files for you, from the tray, without admin rights.
 
-![FolderPilot rules list](docs/screenshot.png)
+![FolderPilot rules list, light theme](docs/screenshot.png)
+![FolderPilot rules list, dark theme](docs/screenshot-dark.png)
+
+In English and Polish (it follows the Windows display language; switch it in **Settings**), light and dark themes.
 
 ## Install
 
-Download `FolderPilot_0.1.0_x64-setup.exe` from the [releases](https://github.com/prejas3/FolderPilot/releases) and run it. It installs for your user only (no admin prompt). Closing the window keeps FolderPilot in the tray; **Start with Windows** in the tray menu starts it hidden at login. Uninstalling removes the app and that startup entry; your rules and history stay in `%APPDATA%\FolderPilot`.
+Download `FolderPilot_0.2.0_x64-setup.exe` from the [releases](https://github.com/prejas3/FolderPilot/releases) and run it. It installs for your user only (no admin prompt). Closing the window keeps FolderPilot in the tray; **Start with Windows** (in **Settings** or the tray menu) starts it hidden at login. Uninstalling removes the app and that startup entry; your rules and history stay in `%APPDATA%\FolderPilot`.
 
 ## Rules
 
@@ -17,14 +20,14 @@ A rule reads as a sentence: *when a file in these folders matches…, move it to
 - **Rename to** a new name in the same folder; the extension is kept unless you use `{ext}`.
 - **Tokens**: `{name}` `{ext}` `{year}` `{month}` `{day}` `{counter}`. For photos the date is when the photo was taken (EXIF), for other files when they were last modified.
 
-The four starters, one click each:
+The four starters, under **New rule**:
 
 | Starter | When | Then |
 |---|---|---|
 | PDFs to Documents | type is pdf | move to `~/Documents/PDF` |
 | Photos by date | type is jpg, jpeg, png, heic | move to `~/Pictures/{year}/{month}` |
 | Rename with date | type is pdf, docx | rename to `{year}-{month}-{day} {name}` |
-| Archive old files | older than 90 days | move to `D:/Archive/{year}` |
+| Archive files older than 90 days | older than 90 days | move to `D:/Archive/{year}` |
 
 ## Safe by design
 
@@ -32,7 +35,7 @@ The four starters, one click each:
 - **Waits for files to settle.** Downloads in progress (`.crdownload`, `.part`, `.tmp`, Office `~$` files) are skipped, and a new file is handled only after it stops changing and no other program has it open.
 - **Preview first.** New rules start switched off; **Preview** shows every planned move before anything happens.
 - **Undo.** Every move is logged; **Activity** lists each run with an **Undo** button. Undo skips a file that has changed or gone since it was moved, and never overwrites what is back in its old place.
-- **Pause** everything from the tray, or one folder from **Folders**.
+- **Pause** everything from **Settings** or the tray, or one folder from **Folders**.
 
 ## Develop
 
@@ -40,6 +43,7 @@ The four starters, one click each:
 npm install
 npm run tauri dev
 cargo test --manifest-path src-tauri/Cargo.toml
+npm run check:i18n    # every string in English and Polish, no hard-coded text
 npm run tauri build   # NSIS installer in src-tauri/target/release/bundle/nsis
 ```
 
@@ -47,4 +51,4 @@ Tests only touch temporary folders.
 
 ## Licence
 
-MIT, see [LICENSE](LICENSE). Third-party components and their licences: [THIRD_PARTY.md](THIRD_PARTY.md).
+MIT, see [LICENSE](LICENSE). Third-party components: [THIRD_PARTY.md](THIRD_PARTY.md); their licence texts ship in `THIRD_PARTY_LICENSES.txt` (`npm run notices` rebuilds it).

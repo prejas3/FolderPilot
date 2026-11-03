@@ -1,6 +1,6 @@
 # Third-party notices
 
-FolderPilot (MIT, see LICENSE) ships the components below. Licence texts are the standard SPDX texts at https://spdx.org/licenses/; each crate's source, with its licence file, is at https://crates.io/crates/<name> for the listed version.
+FolderPilot (MIT, see LICENSE) ships the components below. Their own licence, copyright and notice texts ship with the app in `THIRD_PARTY_LICENSES.txt` (installed next to FolderPilot; regenerate it with `npm run notices`, sources in `licenses/` and each crate's package). Each crate's source is at https://crates.io/crates/<name> for the listed version.
 
 ## BSD-2-Clause crates
 
@@ -25,7 +25,7 @@ Built with NSIS 3.13 (zlib/libpng; its LZMA module CPL-1.0 with a linking except
 | @tauri-apps/api | 2.12.4 | Apache-2.0 OR MIT |
 | @tauri-apps/plugin-dialog | 2.8.4 | MIT OR Apache-2.0 |
 
-Icons: [Fluent UI System Icons](https://github.com/microsoft/fluentui-system-icons) by Microsoft, MIT licence (full text in `licenses/fluentui-system-icons-LICENSE.txt`, installed next to FolderPilot), SVG paths copied into `src/icons.ts` and `src/sj-ui.js` (from `@fluentui/svg-icons` 1.1.345).
+Icons: [Fluent UI System Icons](https://github.com/microsoft/fluentui-system-icons) by Microsoft, MIT licence (full text in `THIRD_PARTY_LICENSES.txt`), SVG paths copied into `src/icons.ts` and `src/sj-ui.js` (from `@fluentui/svg-icons` 1.1.345).
 
 The app icon is FolderPilot's own (`src-tauri/icons/icon.svg`); the UI uses fonts already on Windows (Segoe UI Variable, Segoe UI), no bundled fonts.
 
