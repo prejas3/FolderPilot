@@ -44,7 +44,8 @@
     ],
     "resources": {
       "../THIRD_PARTY.md": "THIRD_PARTY.md",
-      "../LICENSE": "LICENSE.txt"
+      "../LICENSE": "LICENSE.txt",
+      "../licenses/fluentui-system-icons-LICENSE.txt": "licenses/fluentui-system-icons-LICENSE.txt"
     },
     "windows": {
       "nsis": {

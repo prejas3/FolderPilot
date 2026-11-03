@@ -81,9 +81,10 @@
 /* ---- Base ---- */
 *, *::before, *::after { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); }
-html.mica body { background: transparent; }
+/* FolderPilot FO-167 fix (candidate for 1.1): the root canvas is cleared too, else :root's --bg covers Mica. */
+html.mica, html.mica body { background: transparent; }
 @media (prefers-reduced-transparency: reduce), (forced-colors: active) {
-  html.mica body { background: var(--bg); }
+  html.mica, html.mica body { background: var(--bg); }
 }
 [hidden] { display: none !important; }
 button, input { font: inherit; color: inherit; }
